@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFL Reasoning Model</title>
+
+<!-- Runs before first paint so the saved theme is applied with no flash.
+     Order of truth: localStorage (this browser) -> server settings.json -> system. -->
+<script>
+(function () {
+  var t = null;
+  try { t = window.localStorage.getItem('nflTheme'); } catch (e) { /* private mode */ }
+  if (!t) { t = "system"; }
+  if (t !== 'light' && t !== 'dark' && t !== 'system') { t = 'system'; }
+  window.__initialTheme = t;
+  if (t === 'light' || t === 'dark') {
+    document.documentElement.setAttribute('data-theme', t);
+  }
+  document.documentElement.style.colorScheme = (t === 'system') ? 'light dark' : t;
+})();
+</script>
+
+<style>
+/* ---------------------------------------------------------------- tokens */
+:root {
+  color-scheme: light;
+  --surface-1:      #fcfcfb;   /* cards, chart surface */
+  --plane:          #f9f9f7;   /* page background      */
+  --surface-2:      #f2f1ee;   /* insets, table header */
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #898781;
+  --grid:           #e1e0d9;
+  --axis:           #c3c2b7;
+  --border:         rgba(11, 11, 11, .10);
+  --series-home:    #2a78d6;   /* categorical slot 1 - blue   */
+  --series-away:    #eb6834;   /* categorical slot 2 - orange */
+  --good:           #0ca30c;
+  --warning:        #fab219;
+  --serious:        #ec835a;
+  --critical:       #d03b3b;
+  --success-text:   #006300;
+  --shadow:         0 1px 2px rgba(11,11,11,.06), 0 4px 14px rgba(11,11,11,.05);
+  --radius:         12px;
+}
+/* Dark values are declared twice on purpose: the media query follows the OS,
+   the [data-theme] scope follows the toggle, and the toggle must win both
+   ways. The :not() guard lets an explicit light choice beat OS dark. */
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --plane:          #0d0d0d;
+    --surface-2:      #232322;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255, 255, 255, .10);
+    --series-home:    #3987e5;
+    --series-away:    #d95926;
+    --success-text:   #0ca30c;
+    --shadow:         0 1px 2px rgba(0,0,0,.5), 0 4px 16px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1:      #1a1a19;
+  --plane:          #0d0d0d;
+  --surface-2:      #232322;
+  --text-primary:   #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #898781;
+  --grid:           #2c2c2a;
+  --axis:           #383835;
+  --border:         rgba(255, 255, 255, .10);
+  --series-home:    #3987e5;
+  --series-away:    #d95926;
+  --success-text:   #0ca30c;
+  --shadow:         0 1px 2px rgba(0,0,0,.5), 0 4px 16px rgba(0,0,0,.35);
+}
+
+/* ------------------------------------------------------------------ base */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--plane);
+  color: var(--text-primary);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -.01em; }
+h1 { font-size: 17px; }
+h2 { font-size: 15px; }
+h3 { font-size: 13px; color: var(--text-secondary); text-transform: uppercase;
+     letter-spacing: .06em; font-weight: 600; }
+a { color: var(--series-home); }
+.muted { color: var(--text-muted); }
+.sec { color: var(--text-secondary); }
+.num { font-variant-numeric: tabular-nums; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 20px 64px; }
+
+/* ---------------------------------------------------------------- header */
+header {
+  position: sticky; top: 0; z-index: 40;
+  background: color-mix(in srgb, var(--plane) 88%, transparent);
+  backdrop-filter: saturate(1.6) blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+.hbar { max-width: 1180px; margin: 0 auto; padding: 12px 20px;
+        display: flex; align-items: center; gap: 14px; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--series-home); }
+.spacer { flex: 1; }
+
+/* three-way theme switch */
+.seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border);
+       border-radius: 999px; padding: 2px; gap: 2px; }
+.seg button {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  color: var(--text-secondary); font: inherit; font-size: 13px;
+  padding: 5px 12px; border-radius: 999px; display: inline-flex; align-items: center; gap: 6px;
+}
+.seg button:hover { color: var(--text-primary); }
+.seg button[aria-pressed="true"] {
+  background: var(--surface-1); color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0,0,0,.12); font-weight: 600;
+}
+.seg svg { width: 14px; height: 14px; }
+
+/* ------------------------------------------------------------------ tabs */
+nav.tabs { display: flex; gap: 4px; margin: 22px 0 18px; border-bottom: 1px solid var(--border); }
+nav.tabs button {
+  appearance: none; background: none; border: 0; cursor: pointer; font: inherit;
+  color: var(--text-secondary); padding: 9px 14px; border-radius: 8px 8px 0 0;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+nav.tabs button:hover { color: var(--text-primary); background: var(--surface-2); }
+nav.tabs button[aria-selected="true"] {
+  color: var(--text-primary); font-weight: 600; border-bottom-color: var(--series-home);
+}
+
+/* ----------------------------------------------------------------- cards */
+.card { background: var(--surface-1); border: 1px solid var(--border);
+        border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px; }
+.card + .card { margin-top: 16px; }
+.card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+
+/* --------------------------------------------------------------- controls */
+button.btn, select, input[type="number"] {
+  font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 8px; padding: 7px 11px;
+}
+button.btn { cursor: pointer; font-weight: 500; }
+button.btn:hover:not(:disabled) { background: var(--surface-2); }
+button.btn.primary { background: var(--series-home); border-color: transparent; color: #fff; }
+button.btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+button.btn:disabled { opacity: .5; cursor: not-allowed; }
+label.check { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* ----------------------------------------------------------------- pills */
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+        padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border);
+        background: var(--surface-2); color: var(--text-secondary); white-space: nowrap; }
+.pill.ok      { color: var(--success-text); }
+.pill.warn    { color: var(--text-primary); }
+.pill.bad     { color: var(--critical); }
+.pill .ic { font-size: 11px; }
+
+.tag { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+       padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border);
+       background: var(--surface-2); color: var(--text-secondary); }
+.tag.strong { color: var(--critical); }
+.tag.play   { color: var(--text-primary); }
+.tag.lean   { color: var(--text-secondary); }
+.tag.pass   { color: var(--text-muted); }
+
+
+/* ------------------------------------------------------------- bet card */
+.bets { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.bet { display: grid; grid-template-columns: 96px 1fr; gap: 12px; align-items: start;
+       padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px;
+       background: var(--surface-2); }
+.bet .verdict { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+       padding: 5px 0; border-radius: 6px; text-align: center; color: #fff; }
+.bet.t-bet   .verdict { background: var(--good); }
+.bet.t-small .verdict { background: var(--warning); color: #0b0b0b; }
+.bet.t-skip  .verdict { background: var(--text-muted); }
+.bet.t-skip { opacity: .7; }
+.bet .what { font-size: 16px; font-weight: 600; }
+.bet .why  { font-size: 13px; color: var(--text-secondary); margin-top: 3px; }
+.bet .warn { color: var(--serious); }
+.bet-key { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--text-secondary); margin: 0 0 12px; }
+.bet-key b { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.bet-honest { margin-top: 14px; padding: 12px 14px; border-left: 3px solid var(--warning);
+       background: var(--surface-2); border-radius: 8px; font-size: 13px; color: var(--text-secondary); }
+details.skips summary { cursor: pointer; font-size: 13px; color: var(--text-muted); margin-top: 6px; }
+
+/* ----------------------------------------------------------------- table */
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+thead th {
+  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-muted); font-weight: 600; padding: 8px 10px;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+tbody td { padding: 9px 10px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+tbody tr { cursor: pointer; }
+tbody tr:hover td { background: var(--surface-2); }
+tbody tr[aria-selected="true"] td { background: var(--surface-2); }
+td.r, th.r { text-align: right; }
+
+/* ------------------------------------------------------------ win  meter */
+.meter { display: flex; height: 12px; border-radius: 6px; overflow: hidden; gap: 2px; }
+.meter i { display: block; height: 100%; }
+.meter i.home { background: var(--series-home); border-radius: 6px 2px 2px 6px; }
+.meter i.away { background: var(--series-away); border-radius: 2px 6px 6px 2px; }
+.meter-labels { display: flex; justify-content: space-between; font-size: 12px;
+                color: var(--text-secondary); margin-top: 6px; }
+.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+          margin-right: 6px; vertical-align: baseline; }
+
+/* --------------------------------------------------------- driver  bars */
+.drivers { display: grid; gap: 7px; }
+.driver { display: grid; grid-template-columns: 1fr 132px 74px; align-items: center; gap: 10px;
+          font-size: 13px; }
+.driver .lbl { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis;
+               white-space: nowrap; }
+.dbar { position: relative; height: 14px; }
+.dbar .mid { position: absolute; left: 50%; top: -1px; bottom: -1px; width: 1px;
+             background: var(--axis); }
+.dbar i { position: absolute; top: 2px; height: 10px; }
+.dbar i.pos { background: var(--series-home); border-radius: 0 4px 4px 0; }
+.dbar i.neg { background: var(--series-away); border-radius: 4px 0 0 4px; }
+
+/* ----------------------------------------------------------------- panel */
+.panel { position: fixed; inset: 0 0 0 auto; width: min(560px, 100%); z-index: 60;
+         background: var(--surface-1); border-left: 1px solid var(--border);
+         box-shadow: -12px 0 40px rgba(0,0,0,.22); overflow-y: auto;
+         transform: translateX(100%); transition: transform .22s ease; }
+.panel[data-open="1"] { transform: translateX(0); }
+.panel .ph { position: sticky; top: 0; background: var(--surface-1); padding: 16px 20px;
+             border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+.panel .pb { padding: 18px 20px 60px; display: grid; gap: 20px; }
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,.32); z-index: 55; display: none; }
+.scrim[data-open="1"] { display: block; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13px; }
+.kv dt { color: var(--text-muted); }
+.kv dd { margin: 0; text-align: right; }
+ul.flags { margin: 0; padding-left: 18px; display: grid; gap: 5px; font-size: 13px;
+           color: var(--text-secondary); }
+
+/* ------------------------------------------------------------------- log */
+pre.log { margin: 0; background: var(--surface-2); border: 1px solid var(--border);
+          border-radius: 8px; padding: 12px; max-height: 320px; overflow: auto;
+          font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          color: var(--text-secondary); white-space: pre-wrap; }
+
+/* ----------------------------------------------------------------- chart */
+.chart { width: 100%; display: block; overflow: visible; }
+.chart .gridline { stroke: var(--grid); stroke-width: 1; }
+.chart .axisline { stroke: var(--axis); stroke-width: 1; }
+.chart text { fill: var(--text-muted); font-size: 11px; }
+.chart text.lbl { fill: var(--text-secondary); font-size: 11px; font-weight: 600; }
+.chart .ln { fill: none; stroke-width: 2; }
+.legend { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary);
+          margin-bottom: 8px; flex-wrap: wrap; }
+
+#tip { position: fixed; z-index: 90; pointer-events: none; opacity: 0;
+       transition: opacity .1s; background: var(--surface-1); color: var(--text-primary);
+       border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+       font-size: 12px; box-shadow: var(--shadow); max-width: 260px; }
+#tip[data-show="1"] { opacity: 1; }
+
+.empty { text-align: center; padding: 40px 20px; color: var(--text-muted); }
+.hidden { display: none !important; }
+.note { font-size: 13px; color: var(--text-secondary); }
+.bar-track { height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.bar-track i { display: block; height: 100%; border-radius: 4px; background: var(--series-home); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="hbar">
+    <div class="brand"><span class="dot"></span><h1>NFL Reasoning Model</h1></div>
+    <span id="setupPill" class="pill">checking…</span>
+    <span class="spacer"></span>
+    <div class="seg" role="group" aria-label="Colour theme">
+      <button id="thLight" aria-pressed="false" title="Light theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>
+        </svg>Light</button>
+      <button id="thSystem" aria-pressed="false" title="Follow the operating system">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>
+        </svg>System</button>
+      <button id="thDark" aria-pressed="false" title="Dark theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 13a8.5 8.5 0 0 1-10-10 8.5 8.5 0 1 0 10 10z"/>
+        </svg>Dark</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap"><p class="pubnote muted">Read-only copy published 2026-09-07 20:25. Latest picks: 2026 week 1.</p>
+  <nav class="tabs" role="tablist">
+    <button id="tabPred" role="tab" aria-selected="true">Predictions</button>
+    <button id="tabBack" role="tab" aria-selected="false">Backtest</button>
+    <button id="tabSetup" role="tab" aria-selected="false">Setup</button>
+  </nav>
+
+  <!-- ------------------------------------------------------- predictions -->
+  <section id="viewPred">
+    <div class="card">
+      <div class="row">
+        <label class="sec" for="selSeason">Season</label>
+        <select id="selSeason"></select>
+        <label class="sec" for="selWeek">Week</label>
+        <select id="selWeek"></select>
+        <label class="check"><input type="checkbox" id="chkForecast"> live weather</label>
+        <button class="btn primary" id="btnPredict">Run prediction</button>
+        <span class="spacer"></span>
+        <span id="predMeta" class="muted" style="font-size:13px"></span>
+      </div>
+      <div id="predJob" class="hidden" style="margin-top:14px">
+        <div class="row" style="margin-bottom:8px">
+          <strong id="predJobName" style="font-size:13px"></strong>
+          <span id="predJobTime" class="muted" style="font-size:12px"></span>
+        </div>
+        <pre class="log" id="predLog"></pre>
+      </div>
+    </div>
+
+    <div class="card" id="betCard">
+      <div class="card-head"><h2>What to bet</h2>
+        <span class="muted" style="font-size:13px">the whole week in plain words, strongest first</span></div>
+      <div class="bet-key">
+        <span><b style="background:var(--good)"></b>Bet — the model sees a big gap from the book</span>
+        <span><b style="background:var(--warning)"></b>Small bet — a real gap, but not a big one</span>
+        <span><b style="background:var(--text-muted)"></b>Skip — too close to call, keep your money</span>
+      </div>
+      <div id="betList"><div class="empty">Run a prediction first.</div></div>
+    </div>
+
+    <div class="card" id="predCard">
+      <div class="card-head"><h2>Slate</h2>
+        <span class="muted" style="font-size:13px">click a game for the full reasoning</span></div>
+      <div id="predTableWrap"><div class="empty">Nothing predicted for this week yet.</div></div>
+    </div>
+  </section>
+
+  <!-- ---------------------------------------------------------- backtest -->
+  <section id="viewBack" class="hidden">
+    <div class="card">
+      <div class="card-head"><h2>Walk-forward accuracy</h2>
+        <span class="muted" style="font-size:13px">retrained from scratch every season</span></div>
+      <div id="btSummary"><div class="empty">No backtest has been run yet.</div></div>
+    </div>
+    <div class="grid2" id="btCharts"></div>
+  </section>
+
+  <!-- ------------------------------------------------------------- setup -->
+  <section id="viewSetup" class="hidden">
+    <div class="card">
+      <div class="card-head"><h2>Pipeline</h2></div>
+      <p class="note" id="setupNote"></p>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="btnBuild">1 &nbsp;Build data</button>
+        <button class="btn" id="btnTrain">2 &nbsp;Train models</button>
+        <button class="btn" id="btnBacktest">3 &nbsp;Run backtest</button>
+      </div>
+      <div id="setupSteps" class="row" style="margin-top:14px"></div>
+      <div id="setupJob" class="hidden" style="margin-top:16px">
+        <div class="row" style="margin-bottom:8px">
+          <strong id="setupJobName" style="font-size:13px"></strong>
+          <span id="setupJobTime" class="muted" style="font-size:12px"></span>
+        </div>
+        <pre class="log" id="setupLog"></pre>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Dependencies</h2></div>
+      <div id="deps" class="row"></div>
+    </div>
+  </section>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="panel" id="panel" aria-hidden="true">
+  <div class="ph">
+    <h2 id="panelTitle">Game</h2><span class="spacer"></span>
+    <button class="btn" id="btnCopy">Copy LLM prompt</button>
+    <button class="btn" id="btnClose" aria-label="Close">✕</button>
+  </div>
+  <div class="pb" id="panelBody"></div>
+</aside>
+
+<div id="tip" role="tooltip"></div>
+
+
+<style>
+  /* published copy: no Python behind the page, so hide everything that runs it */
+  #btnPredict, label.check, #tabSetup { display: none !important; }
+  .pubnote { font-size: 12px; margin: 14px 0 0; opacity: .75; }
+</style>
+<script>
+window.__STATIC__ = {"state":{"setup":{"data_built":true,"model_trained":true,"backtest_run":true,"deps_ok":{}},"settings":{"theme":"system","season":2026,"week":1},"weeks":{"predicted":[{"season":2026,"week":1}],"schedule":[{"season":2026,"week":1}]},"current_job":null,"root":"published copy"},"predictions":{"2026_1":{"available":true,"rows":[{"game_id":"2026_01_ARI_LAC","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"LAC","away_team":"ARI","home_spread":10.5,"market_total":46.5,"model_p_home_win":0.7377049180327869,"model_pred_margin":6.474240125290647,"model_pred_total":43.627477788754724,"model_model_spread":-6.474240125290647,"model_p_home_cover":0.35451207658163375,"model_p_over":0.3936246163041631,"model_spread_edge":-4.025759874709353,"model_total_edge":-2.8725222112452755,"anchored_p_home_win":0.9,"anchored_pred_margin":11.323794320272727,"anchored_pred_total":47.30111830438108,"anchored_model_spread":-11.323794320272727,"anchored_p_home_cover":0.5306544646822953,"anchored_p_over":0.5300976484460768,"anchored_spread_edge":0.8237943202727274,"anchored_total_edge":0.8011183043810786,"pick_side":"ARI","pick_total":"Under","confidence":"strong"},{"game_id":"2026_01_ATL_PIT","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"PIT","away_team":"ATL","home_spread":3.0,"market_total":41.5,"model_p_home_win":0.6000000000000001,"model_pred_margin":4.15027369190813,"model_pred_total":41.86218038561713,"model_model_spread":-4.15027369190813,"model_p_home_cover":0.5424565152911418,"model_p_over":0.5135726759804661,"model_spread_edge":1.1502736919081302,"model_total_edge":0.36218038561712973,"anchored_p_home_win":0.6542056074766354,"anchored_pred_margin":4.039522411987218,"anchored_pred_total":42.46615722125798,"anchored_model_spread":-4.039522411987218,"anchored_p_home_cover":0.5386594278808995,"anchored_p_over":0.5362824247686888,"anchored_spread_edge":1.0395224119872184,"anchored_total_edge":0.96615722125798,"pick_side":"PIT","pick_total":"Over","confidence":"lean"},{"game_id":"2026_01_BAL_IND","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"IND","away_team":"BAL","home_spread":-3.5,"market_total":48.5,"model_p_home_win":0.38571428571428573,"model_pred_margin":-2.530881625206027,"model_pred_total":45.37249854304283,"model_model_spread":2.530881625206027,"model_p_home_cover":0.5357897332754991,"model_p_over":0.38443985118685786,"model_spread_edge":0.9691183747939731,"model_total_edge":-3.1275014569571695,"anchored_p_home_win":0.28125,"anchored_pred_margin":-5.511262680832464,"anchored_pred_total":48.23131710996026,"anchored_model_spread":5.511262680832464,"anchored_p_home_cover":0.4255224593045236,"anchored_p_over":0.48989719192319103,"anchored_spread_edge":-2.0112626808324636,"anchored_total_edge":-0.2686828900397399,"pick_side":"IND","pick_total":"Under","confidence":"pass"},{"game_id":"2026_01_BUF_HOU","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"HOU","away_team":"BUF","home_spread":-1.5,"market_total":44.5,"model_p_home_win":0.525,"model_pred_margin":0.695463202819155,"model_pred_total":42.69657252264505,"model_model_spread":-0.695463202819155,"model_p_home_cover":0.5806310113188039,"model_p_over":0.43272573637563505,"model_spread_edge":2.195463202819155,"model_total_edge":-1.8034274773549512,"anchored_p_home_win":0.504587155963303,"anchored_pred_margin":-1.2386241286405322,"anchored_pred_total":43.51368106019831,"anchored_model_spread":1.2386241286405322,"anchored_p_home_cover":0.5097347627610481,"anchored_p_over":0.4629625922413505,"anchored_spread_edge":0.2613758713594679,"anchored_total_edge":-0.9863189398016918,"pick_side":"HOU","pick_total":"Under","confidence":"play"},{"game_id":"2026_01_CHI_CAR","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"CAR","away_team":"CHI","home_spread":-2.5,"market_total":46.5,"model_p_home_win":0.3014705882352941,"model_pred_margin":-4.623702535566009,"model_pred_total":44.70036183461239,"model_model_spread":4.623702535566009,"model_p_home_cover":0.42197004298435725,"model_p_over":0.4328657478468594,"model_spread_edge":-2.123702535566009,"model_total_edge":-1.7996381653876128,"anchored_p_home_win":0.28125,"anchored_pred_margin":-5.7329824912800325,"anchored_pred_total":46.5931503819527,"anchored_model_spread":5.7329824912800325,"anchored_p_home_cover":0.38138185786069484,"anchored_p_over":0.5035028987006032,"anchored_spread_edge":-3.2329824912800325,"anchored_total_edge":0.09315038195269802,"pick_side":"CHI","pick_total":"Under","confidence":"play"},{"game_id":"2026_01_CLE_JAX","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"JAX","away_team":"CLE","home_spread":7.5,"market_total":40.5,"model_p_home_win":0.72,"model_pred_margin":5.971590740237992,"model_pred_total":41.95113999675692,"model_model_spread":-5.971590740237992,"model_p_home_cover":0.4436681286696696,"model_p_over":0.554223787627113,"model_spread_edge":-1.5284092597620083,"model_total_edge":1.4511399967569218,"anchored_p_home_win":0.7142857142857143,"anchored_pred_margin":4.48304755976422,"anchored_pred_total":41.620583905013966,"anchored_model_spread":-4.48304755976422,"anchored_p_home_cover":0.3890931102746973,"anchored_p_over":0.5420616102862177,"anchored_spread_edge":-3.0169524402357806,"anchored_total_edge":1.1205839050139643,"pick_side":"CLE","pick_total":"Over","confidence":"lean"},{"game_id":"2026_01_DAL_NYG","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"NYG","away_team":"DAL","home_spread":-2.5,"market_total":48.5,"model_p_home_win":0.38571428571428573,"model_pred_margin":2.29378144353722,"model_pred_total":48.38097609084991,"model_model_spread":-2.29378144353722,"model_p_home_cover":0.6716083327538434,"model_p_over":0.49553882233380087,"model_spread_edge":4.79378144353722,"model_total_edge":-0.11902390915008709,"anchored_p_home_win":0.34146341463414637,"anchored_pred_margin":-2.670665838523272,"anchored_pred_total":46.77166381178016,"anchored_model_spread":2.670665838523272,"anchored_p_home_cover":0.49364330748146745,"anchored_p_over":0.4352918526135586,"anchored_spread_edge":-0.1706658385232724,"anchored_total_edge":-1.7283361882198447,"pick_side":"NYG","pick_total":"Under","confidence":"strong"},{"game_id":"2026_01_DEN_KC","season":2026.0,"week":1.0,"gameday":"2026-09-14","home_team":"KC","away_team":"DEN","home_spread":3.0,"market_total":42.5,"model_p_home_win":0.3014705882352941,"model_pred_margin":-2.566779372308799,"model_pred_total":41.41702562928896,"model_model_spread":2.566779372308799,"model_p_home_cover":0.3029231901736812,"model_p_over":0.45947773763669086,"model_spread_edge":-5.566779372308799,"model_total_edge":-1.0829743707110424,"anchored_p_home_win":0.5,"anchored_pred_margin":2.7784885847802046,"anchored_pred_total":44.329324713751646,"anchored_model_spread":-2.7784885847802046,"anchored_p_home_cover":0.4917497304884587,"anchored_p_over":0.568452819101704,"anchored_spread_edge":-0.2215114152197954,"anchored_total_edge":1.8293247137516482,"pick_side":"DEN","pick_total":"Under","confidence":"strong"},{"game_id":"2026_01_GB_MIN","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"MIN","away_team":"GB","home_spread":1.5,"market_total":45.5,"model_p_home_win":0.38571428571428573,"model_pred_margin":0.03044937659446556,"model_pred_total":45.623063323297984,"model_model_spread":-0.03044937659446556,"model_p_home_cover":0.44582380106002356,"model_p_over":0.5046125737552027,"model_spread_edge":-1.4695506234055344,"model_total_edge":0.12306332329798408,"anchored_p_home_win":0.504587155963303,"anchored_pred_margin":0.6590467554329071,"anchored_pred_total":45.54378471651634,"anchored_model_spread":-0.6590467554329071,"anchored_p_home_cover":0.46870832695063847,"anchored_p_over":0.5016465306824629,"anchored_spread_edge":-0.8409532445670929,"anchored_total_edge":0.04378471651633892,"pick_side":"GB","pick_total":"Over","confidence":"lean"},{"game_id":"2026_01_MIA_LV","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"LV","away_team":"MIA","home_spread":3.5,"market_total":40.5,"model_p_home_win":0.525,"model_pred_margin":-2.7167406967819976,"model_pred_total":45.070386542173225,"model_model_spread":2.7167406967819976,"model_p_home_cover":0.2822198864803152,"model_p_over":0.6661857890647673,"model_spread_edge":-6.216740696781997,"model_total_edge":4.570386542173225,"anchored_p_home_win":0.6542056074766354,"anchored_pred_margin":0.4067914462571216,"anchored_pred_total":44.68609628265355,"anchored_model_spread":-0.4067914462571216,"anchored_p_home_cover":0.3863659611489926,"anchored_p_over":0.653427786207784,"anchored_spread_edge":-3.0932085537428784,"anchored_total_edge":4.186096282653552,"pick_side":"MIA","pick_total":"Over","confidence":"strong"},{"game_id":"2026_01_NE_SEA","season":2026.0,"week":1.0,"gameday":"2026-09-09","home_team":"SEA","away_team":"NE","home_spread":3.5,"market_total":44.5,"model_p_home_win":0.6000000000000001,"model_pred_margin":3.3622669263398417,"model_pred_total":42.76509546114712,"model_model_spread":-3.3622669263398417,"model_p_home_cover":0.49490678658199166,"model_p_over":0.43525888132422397,"model_spread_edge":-0.1377330736601583,"model_total_edge":-1.7349045388528808,"anchored_p_home_win":0.6542056074766354,"anchored_pred_margin":4.177525703238789,"anchored_pred_total":46.53918044744035,"anchored_model_spread":-4.177525703238789,"anchored_p_home_cover":0.5252196577702841,"anchored_p_over":0.5762142864734401,"anchored_spread_edge":0.6775257032387896,"anchored_total_edge":2.039180447440349,"pick_side":"NE","pick_total":"Under","confidence":"pass"},{"game_id":"2026_01_NO_DET","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"DET","away_team":"NO","home_spread":7.0,"market_total":49.5,"model_p_home_win":0.5897417468238991,"model_pred_margin":3.597190985478401,"model_pred_total":48.72138038746351,"model_model_spread":-3.597190985478401,"model_p_home_cover":0.3762203676228216,"model_p_over":0.47084168117457714,"model_spread_edge":-3.402809014521599,"model_total_edge":-0.7786196125364881,"anchored_p_home_win":0.6842105263157895,"anchored_pred_margin":5.894311634812383,"anchored_pred_total":52.30724548030337,"anchored_model_spread":-5.894311634812383,"anchored_p_home_cover":0.45888835419158647,"anchored_p_over":0.6043479974690872,"anchored_spread_edge":-1.1056883651876168,"anchored_total_edge":2.8072454803033735,"pick_side":"NO","pick_total":"Under","confidence":"play"},{"game_id":"2026_01_NYJ_TEN","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"TEN","away_team":"NYJ","home_spread":3.0,"market_total":38.5,"model_p_home_win":0.5846153846153846,"model_pred_margin":2.7801965974763942,"model_pred_total":42.85859729186279,"model_model_spread":-2.7801965974763942,"model_p_home_cover":0.49187226009408463,"model_p_over":0.6589160843114726,"model_spread_edge":-0.21980340252360575,"model_total_edge":4.358597291862793,"anchored_p_home_win":0.504587155963303,"anchored_pred_margin":0.969231695467017,"anchored_pred_total":39.8188741398789,"anchored_model_spread":-0.969231695467017,"anchored_p_home_cover":0.42480873417417464,"anchored_p_over":0.5494691349309855,"anchored_spread_edge":-2.030768304532983,"anchored_total_edge":1.3188741398789015,"pick_side":"NYJ","pick_total":"Over","confidence":"pass"},{"game_id":"2026_01_SF_LA","season":2026.0,"week":1.0,"gameday":"2026-09-10","home_team":"LA","away_team":"SF","home_spread":3.5,"market_total":48.5,"model_p_home_win":0.525,"model_pred_margin":2.3396233656908327,"model_pred_total":54.418795701379985,"model_model_spread":-2.3396233656908327,"model_p_home_cover":0.45717201545844205,"model_p_over":0.7109264547628948,"model_spread_edge":-1.1603766343091673,"model_total_edge":5.918795701379985,"anchored_p_home_win":0.504587155963303,"anchored_pred_margin":2.5075182043311335,"anchored_pred_total":50.18521767697441,"anchored_model_spread":-2.5075182043311335,"anchored_p_home_cover":0.46308487388135233,"anchored_p_over":0.563107515890596,"anchored_spread_edge":-0.9924817956688666,"anchored_total_edge":1.6852176769744123,"pick_side":"SF","pick_total":"Over","confidence":"lean"},{"game_id":"2026_01_TB_CIN","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"CIN","away_team":"TB","home_spread":3.5,"market_total":51.5,"model_p_home_win":0.5714285714285714,"model_pred_margin":2.7779138976560813,"model_pred_total":47.19884857002413,"model_model_spread":-2.7779138976560813,"model_p_home_cover":0.4733172716089868,"model_p_over":0.34306611061286785,"model_spread_edge":-0.7220861023439187,"model_total_edge":-4.301151429975867,"anchored_p_home_win":0.504587155963303,"anchored_pred_margin":1.5527931093921157,"anchored_pred_total":51.25559510103019,"anchored_model_spread":-1.5527931093921157,"anchored_p_home_cover":0.42786801283342835,"anchored_p_over":0.4908099048169401,"anchored_spread_edge":-1.9472068906078843,"anchored_total_edge":-0.24440489896981094,"pick_side":"TB","pick_total":"Under","confidence":"pass"},{"game_id":"2026_01_WAS_PHI","season":2026.0,"week":1.0,"gameday":"2026-09-13","home_team":"PHI","away_team":"WAS","home_spread":4.5,"market_total":47.5,"model_p_home_win":0.6428571428571429,"model_pred_margin":5.516720023132235,"model_pred_total":45.394179232658196,"model_model_spread":-5.516720023132235,"model_p_home_cover":0.5375425947867258,"model_p_over":0.4215812757588284,"model_spread_edge":1.016720023132235,"model_total_edge":-2.105820767341804,"anchored_p_home_win":0.6542056074766354,"anchored_pred_margin":4.684899435252387,"anchored_pred_total":47.1345352034326,"anchored_model_spread":-4.684899435252387,"anchored_p_home_cover":0.5068867924878778,"anchored_p_over":0.4862593216384553,"anchored_spread_edge":0.18489943525238686,"anchored_total_edge":-0.3654647965674017,"pick_side":"PHI","pick_total":"Under","confidence":"lean"}],"packets":[{"game":{"game_id":"2026_01_ARI_LAC","season":2026,"week":1,"home_team":"LAC","away_team":"ARI","kickoff":"2026-09-13","stadium":"SoFi Stadium"},"prediction":{"home_win_prob":0.7377,"away_win_prob":0.2623,"predicted_margin_home":6.47,"model_spread_home":-6.47,"predicted_total":43.63,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-10.5,"market_home_favored_by":10.5,"market_total":46.5,"market_home_win_prob":0.8119,"spread_edge_points":-4.03,"total_edge_points":-2.87,"win_prob_edge":-0.0742,"recommended_side":"ARI +10.5","recommended_total":"Under 46.5"},"environment":{"roof":"dome","surface":"matrixturf","indoor":true,"wind_mph":0.0,"temp_f":68.0,"weather_impact":0.0,"kickoff_bucket":"late_afternoon","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":350.0,"divisional":false,"projected_pace_sec_per_play":30.99,"projected_scoring_env":3.68},"team_form":{"LAC":{"power_rating":0.22,"offense_rating":-0.88,"defense_rating":1.1,"qb_impact":-0.048,"qb_epa_per_dropback_l5":-0.048,"off_epa_ewma":-0.092,"def_epa_ewma":-0.096,"explosive_rate":0.062,"rz_td_rate":0.325,"win_rate_l5":0.4,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"ARI":{"power_rating":-2.12,"offense_rating":-0.24,"defense_rating":-1.88,"qb_impact":-0.057,"qb_epa_per_dropback_l5":-0.057,"off_epa_ewma":-0.016,"def_epa_ewma":0.147,"explosive_rate":0.078,"rz_td_rate":0.482,"win_rate_l5":0.0,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home rz vs away rz def","edge":-0.355},{"matchup":"home pass off vs away pass def","edge":-0.314},{"matchup":"away rz vs home rz def","edge":0.172},{"matchup":"home rush off vs away rush def","edge":-0.131},{"matchup":"away rush off vs home rush def","edge":0.087},{"matchup":"away pass-rush edge","edge":-0.054},{"matchup":"away pass off vs home pass def","edge":0.051},{"matchup":"home expl vs away expl def","edge":-0.044}],"drivers":{"win":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":10.745,"impact":0.248,"direction":"favors LAC"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.135,"impact":0.154,"direction":"favors LAC"},{"feature":"d_def_epa_per_play_l3","label":"gap in defensive EPA per play (last 3)","value":-0.302,"impact":-0.126,"direction":"favors ARI"},{"feature":"d_coach_margin","label":"gap in coach margin","value":9.249,"impact":0.096,"direction":"favors LAC"},{"feature":"d_off_points_per_drive_l3","label":"gap in offensive points per drive (last 3)","value":-1.307,"impact":0.094,"direction":"favors LAC"},{"feature":"home_def_power","label":"home defensive power","value":1.101,"impact":0.083,"direction":"favors LAC"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":0.363,"impact":0.07,"direction":"favors LAC"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":3.678,"impact":0.063,"direction":"favors LAC"},{"feature":"pace_projection","label":"projected pace","value":30.989,"impact":-0.061,"direction":"favors ARI"},{"feature":"d_qb_sack_rate_l5","label":"gap in QB sack rate (last 5)","value":0.04,"impact":0.059,"direction":"favors LAC"},{"feature":"d_adj_off_points_per_drive_l3","label":"gap in opponent-adjusted offensive points per drive (last 3)","value":-1.302,"impact":0.057,"direction":"favors LAC"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":0.04,"impact":0.055,"direction":"favors LAC"}],"margin":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":10.745,"impact":1.971,"direction":"favors LAC"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.135,"impact":0.897,"direction":"favors LAC"},{"feature":"d_off_points_per_drive_l3","label":"gap in offensive points per drive (last 3)","value":-1.307,"impact":0.676,"direction":"favors LAC"},{"feature":"d_def_explosive_rate_l5","label":"gap in defensive explosive play rate (last 5)","value":-0.039,"impact":-0.489,"direction":"favors ARI"},{"feature":"d_coach_margin","label":"gap in coach margin","value":9.249,"impact":0.467,"direction":"favors LAC"},{"feature":"d_def_epa_per_play_l3","label":"gap in defensive EPA per play (last 3)","value":-0.302,"impact":-0.441,"direction":"favors ARI"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-2.889,"impact":-0.419,"direction":"favors ARI"},{"feature":"d_def_early_down_epa_ewma","label":"gap in defensive early-down EPA/play (recency-weighted)","value":-0.229,"impact":0.377,"direction":"favors LAC"},{"feature":"d_def_success_rate_ewma","label":"gap in defensive success rate (recency-weighted)","value":-0.079,"impact":0.36,"direction":"favors LAC"},{"feature":"away_power","label":"away power","value":-2.117,"impact":-0.346,"direction":"favors ARI"},{"feature":"pace_projection","label":"projected pace","value":30.989,"impact":-0.33,"direction":"favors ARI"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":31.0,"impact":0.314,"direction":"favors LAC"}],"total":[{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":0.363,"impact":-1.417,"direction":"lower scoring"},{"feature":"pace_projection","label":"projected pace","value":30.989,"impact":-1.131,"direction":"lower scoring"},{"feature":"expected_explosive_rate","label":"projected explosive-play rate","value":0.07,"impact":-1.12,"direction":"lower scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":1.429,"impact":1.081,"direction":"higher scoring"},{"feature":"wind_mph","label":"wind speed","value":0.0,"impact":1.08,"direction":"higher scoring"},{"feature":"home_def_power","label":"home defensive power","value":1.101,"impact":-0.814,"direction":"lower scoring"},{"feature":"d_def_rz_td_rate_l3","label":"gap in defensive red-zone TD rate (last 3)","value":-0.833,"impact":0.796,"direction":"higher scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":3.678,"impact":-0.767,"direction":"lower scoring"},{"feature":"away_def_power","label":"away defensive power","value":-1.879,"impact":0.704,"direction":"higher scoring"},{"feature":"home_off_power","label":"home offensive power","value":-0.877,"impact":-0.47,"direction":"lower scoring"},{"feature":"d_def_explosive_rate_l5","label":"gap in defensive explosive play rate (last 5)","value":-0.039,"impact":-0.456,"direction":"lower scoring"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":1.164,"impact":-0.456,"direction":"lower scoring"}]},"uncertainty":{"win_prob_member_sd":0.0081,"margin_member_sd":0.91,"member_win_probs":{"xgb":0.7697,"lgb":0.768,"linear":0.7518}},"flags":["Model line differs from market by 4.0 points (away side) - verify no late news is missing."]},{"game":{"game_id":"2026_01_ATL_PIT","season":2026,"week":1,"home_team":"PIT","away_team":"ATL","kickoff":"2026-09-13","stadium":"Acrisure Stadium"},"prediction":{"home_win_prob":0.6,"away_win_prob":0.4,"predicted_margin_home":4.15,"model_spread_home":-4.15,"predicted_total":41.86,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-3.0,"market_home_favored_by":3.0,"market_total":41.5,"market_home_win_prob":0.6092,"spread_edge_points":1.15,"total_edge_points":0.36,"win_prob_edge":-0.0092,"recommended_side":"PIT -3.0","recommended_total":"Over 41.5"},"environment":{"roof":"outdoors","surface":"grass","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"early","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":521.0,"divisional":false,"projected_pace_sec_per_play":30.7,"projected_scoring_env":3.77},"team_form":{"PIT":{"power_rating":-0.5,"offense_rating":-0.5,"defense_rating":-0.0,"qb_impact":-0.052,"qb_epa_per_dropback_l5":-0.052,"off_epa_ewma":-0.077,"def_epa_ewma":0.018,"explosive_rate":0.086,"rz_td_rate":0.401,"win_rate_l5":0.6,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"ATL":{"power_rating":-0.11,"offense_rating":-0.03,"defense_rating":-0.08,"qb_impact":0.037,"qb_epa_per_dropback_l5":0.037,"off_epa_ewma":-0.016,"def_epa_ewma":-0.001,"explosive_rate":0.089,"rz_td_rate":0.631,"win_rate_l5":0.8,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"away rz vs home rz def","edge":0.139},{"matchup":"home rz vs away rz def","edge":-0.115},{"matchup":"home pass off vs away pass def","edge":-0.114},{"matchup":"away rush off vs home rush def","edge":-0.037},{"matchup":"home pass-rush edge","edge":0.027},{"matchup":"away pass-rush edge","edge":0.025},{"matchup":"away pass off vs home pass def","edge":-0.022},{"matchup":"away expl vs home expl def","edge":0.003}],"drivers":{"win":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.08,"impact":0.21,"direction":"favors PIT"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":-0.444,"impact":0.131,"direction":"favors PIT"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":-1.979,"impact":-0.079,"direction":"favors ATL"},{"feature":"d_coach_margin","label":"gap in coach margin","value":8.215,"impact":0.079,"direction":"favors PIT"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":3.769,"impact":0.067,"direction":"favors PIT"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":0.199,"impact":0.066,"direction":"favors PIT"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":0.024,"impact":0.06,"direction":"favors PIT"},{"feature":"d_off_points_per_drive_l3","label":"gap in offensive points per drive (last 3)","value":-0.902,"impact":0.05,"direction":"favors PIT"},{"feature":"d_off_pass_rate_oe_l5","label":"gap in offensive pass rate over expected (last 5)","value":7.977,"impact":-0.048,"direction":"favors ATL"},{"feature":"d_adj_off_success_rate_ewma","label":"gap in opponent-adjusted offensive success rate (recency-weighted)","value":-0.014,"impact":-0.047,"direction":"favors ATL"},{"feature":"expected_pressure_rate","label":"projected pressure rate","value":0.08,"impact":0.045,"direction":"favors PIT"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-2.782,"impact":-0.044,"direction":"favors ATL"}],"margin":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.08,"impact":1.405,"direction":"favors PIT"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":-0.444,"impact":1.149,"direction":"favors PIT"},{"feature":"expected_pressure_rate","label":"projected pressure rate","value":0.08,"impact":0.955,"direction":"favors PIT"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":-1.979,"impact":-0.818,"direction":"favors ATL"},{"feature":"d_coach_margin","label":"gap in coach margin","value":8.215,"impact":0.501,"direction":"favors PIT"},{"feature":"d_def_early_down_epa_std","label":"gap in defensive early-down EPA/play (season to date)","value":0.0,"impact":-0.396,"direction":"favors ATL"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-2.782,"impact":-0.328,"direction":"favors ATL"},{"feature":"d_off_early_down_epa_ewma","label":"gap in offensive early-down EPA/play (recency-weighted)","value":-0.123,"impact":-0.317,"direction":"favors ATL"},{"feature":"d_off_pass_sr_l3","label":"gap in offensive pass success rate (last 3)","value":-0.103,"impact":0.309,"direction":"favors PIT"},{"feature":"d_off_rz_td_rate_ewma","label":"gap in offensive red-zone TD rate (recency-weighted)","value":-0.23,"impact":0.271,"direction":"favors PIT"},{"feature":"d_off_turnovers_per_play_l5","label":"gap in offensive turnovers per play (last 5)","value":-0.011,"impact":-0.259,"direction":"favors ATL"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":102.0,"impact":0.25,"direction":"favors PIT"}],"total":[{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-4.265,"impact":-0.825,"direction":"lower scoring"},{"feature":"home_off_power","label":"home offensive power","value":-0.5,"impact":-0.54,"direction":"lower scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":-0.052,"impact":-0.515,"direction":"lower scoring"},{"feature":"pace_projection","label":"projected pace","value":30.699,"impact":-0.494,"direction":"lower scoring"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":0.029,"impact":0.464,"direction":"higher scoring"},{"feature":"wind_mph","label":"wind speed","value":null,"impact":-0.402,"direction":"lower scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":3.769,"impact":-0.395,"direction":"lower scoring"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":0.728,"impact":0.39,"direction":"higher scoring"},{"feature":"d_off_rush_sr_l3","label":"gap in offensive rush success rate (last 3)","value":0.104,"impact":-0.376,"direction":"lower scoring"},{"feature":"plays_projection","label":"projected play volume","value":62.796,"impact":-0.364,"direction":"lower scoring"},{"feature":"d_qb_success_l5","label":"gap in QB success (last 5)","value":-0.047,"impact":0.356,"direction":"higher scoring"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":102.0,"impact":0.307,"direction":"higher scoring"}]},"uncertainty":{"win_prob_member_sd":0.0113,"margin_member_sd":0.28,"member_win_probs":{"xgb":0.6838,"lgb":0.6586,"linear":0.661}},"flags":[]},{"game":{"game_id":"2026_01_BAL_IND","season":2026,"week":1,"home_team":"IND","away_team":"BAL","kickoff":"2026-09-13","stadium":"Lucas Oil Stadium"},"prediction":{"home_win_prob":0.3857,"away_win_prob":0.6143,"predicted_margin_home":-2.53,"model_spread_home":2.53,"predicted_total":45.37,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":3.5,"market_home_favored_by":-3.5,"market_total":48.5,"market_home_win_prob":0.3908,"spread_edge_points":0.97,"total_edge_points":-3.13,"win_prob_edge":-0.005,"recommended_side":"IND +3.5","recommended_total":"Under 48.5"},"environment":{"roof":null,"surface":"fieldturf","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"early","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":509.0,"divisional":false,"projected_pace_sec_per_play":30.61,"projected_scoring_env":4.9},"team_form":{"IND":{"power_rating":-0.45,"offense_rating":0.16,"defense_rating":-0.61,"qb_impact":-0.008,"qb_epa_per_dropback_l5":-0.042,"off_epa_ewma":-0.008,"def_epa_ewma":0.046,"explosive_rate":0.063,"rz_td_rate":0.683,"win_rate_l5":0.0,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"BAL":{"power_rating":0.63,"offense_rating":0.89,"defense_rating":-0.26,"qb_impact":-0.012,"qb_epa_per_dropback_l5":-0.012,"off_epa_ewma":0.091,"def_epa_ewma":0.008,"explosive_rate":0.112,"rz_td_rate":0.473,"win_rate_l5":0.4,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home rz vs away rz def","edge":0.289},{"matchup":"home rush off vs away rush def","edge":0.188},{"matchup":"away rush off vs home rush def","edge":0.174},{"matchup":"home pass off vs away pass def","edge":-0.086},{"matchup":"away rz vs home rz def","edge":-0.051},{"matchup":"home pass-rush edge","edge":-0.05},{"matchup":"home expl vs away expl def","edge":-0.038},{"matchup":"away expl vs home expl def","edge":0.026}],"drivers":{"win":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":-8.37,"impact":-0.245,"direction":"favors BAL"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-7.848,"impact":0.114,"direction":"favors IND"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.216,"impact":-0.103,"direction":"favors BAL"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.9,"impact":-0.086,"direction":"favors BAL"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":-0.06,"impact":0.085,"direction":"favors IND"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":-0.012,"impact":0.075,"direction":"favors IND"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-1.38,"impact":-0.068,"direction":"favors BAL"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":-0.035,"impact":-0.064,"direction":"favors BAL"},{"feature":"mm_home_rz_vs_away_rz_def","label":"home rz vs away rz def","value":0.289,"impact":0.063,"direction":"favors IND"},{"feature":"d_off_points_per_drive_l3","label":"gap in offensive points per drive (last 3)","value":-0.561,"impact":0.043,"direction":"favors IND"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":0.056,"impact":-0.04,"direction":"favors BAL"},{"feature":"d_off_third_down_rate_l3","label":"gap in offensive 3rd-down conversion rate (last 3)","value":-0.096,"impact":0.038,"direction":"favors IND"}],"margin":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":-8.37,"impact":-2.341,"direction":"favors BAL"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.216,"impact":-1.117,"direction":"favors BAL"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.9,"impact":-0.394,"direction":"favors BAL"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-1.38,"impact":-0.374,"direction":"favors BAL"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":-110.0,"impact":-0.349,"direction":"favors BAL"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-7.848,"impact":0.348,"direction":"favors IND"},{"feature":"d_def_early_down_epa_std","label":"gap in defensive early-down EPA/play (season to date)","value":0.0,"impact":-0.311,"direction":"favors BAL"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":-0.012,"impact":0.274,"direction":"favors IND"},{"feature":"away_power","label":"away power","value":0.628,"impact":-0.257,"direction":"favors BAL"},{"feature":"d_off_rz_td_rate_l5","label":"gap in offensive red-zone TD rate (last 5)","value":0.317,"impact":-0.241,"direction":"favors BAL"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":null,"impact":0.237,"direction":"favors IND"},{"feature":"d_one_score_win_rate","label":"one-score-game win rate gap (regression risk)","value":0.087,"impact":-0.236,"direction":"favors BAL"}],"total":[{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.9,"impact":2.223,"direction":"higher scoring"},{"feature":"d_adj_def_rush_epa_ewma","label":"gap in opponent-adjusted defensive rushing EPA/play (recency-weighted)","value":0.208,"impact":-0.767,"direction":"lower scoring"},{"feature":"wind_mph","label":"wind speed","value":null,"impact":-0.766,"direction":"lower scoring"},{"feature":"home_def_power","label":"home defensive power","value":-0.607,"impact":0.696,"direction":"higher scoring"},{"feature":"mm_home_pressure_edge","label":"home pass-rush edge","value":-0.05,"impact":-0.682,"direction":"lower scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-7.848,"impact":-0.67,"direction":"lower scoring"},{"feature":"mm_home_expl_vs_away_expl_def","label":"home expl vs away expl def","value":-0.038,"impact":0.425,"direction":"higher scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":-0.008,"impact":-0.392,"direction":"lower scoring"},{"feature":"away_qb_impact","label":"away QB impact","value":-0.012,"impact":-0.385,"direction":"lower scoring"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":-3.68,"impact":0.385,"direction":"higher scoring"},{"feature":"pace_projection","label":"projected pace","value":30.608,"impact":-0.359,"direction":"lower scoring"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":null,"impact":-0.348,"direction":"lower scoring"}]},"uncertainty":{"win_prob_member_sd":0.0533,"margin_member_sd":2.12,"member_win_probs":{"xgb":0.467,"lgb":0.3953,"linear":0.5255}},"flags":[]},{"game":{"game_id":"2026_01_BUF_HOU","season":2026,"week":1,"home_team":"HOU","away_team":"BUF","kickoff":"2026-09-13","stadium":"Reliant Stadium"},"prediction":{"home_win_prob":0.525,"away_win_prob":0.475,"predicted_margin_home":0.7,"model_spread_home":-0.7,"predicted_total":42.7,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":1.5,"market_home_favored_by":-1.5,"market_total":44.5,"market_home_win_prob":0.4783,"spread_edge_points":2.2,"total_edge_points":-1.8,"win_prob_edge":0.0467,"recommended_side":"HOU +1.5","recommended_total":"Under 44.5"},"environment":{"roof":null,"surface":"astroturf","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"early","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":1290.0,"divisional":false,"projected_pace_sec_per_play":31.62,"projected_scoring_env":4.57},"team_form":{"HOU":{"power_rating":1.35,"offense_rating":-0.63,"defense_rating":1.99,"qb_impact":-0.07,"qb_epa_per_dropback_l5":-0.07,"off_epa_ewma":-0.055,"def_epa_ewma":-0.175,"explosive_rate":0.068,"rz_td_rate":0.467,"win_rate_l5":0.8,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"BUF":{"power_rating":1.71,"offense_rating":1.77,"defense_rating":-0.06,"qb_impact":0.014,"qb_epa_per_dropback_l5":0.014,"off_epa_ewma":0.144,"def_epa_ewma":-0.016,"explosive_rate":0.108,"rz_td_rate":0.686,"win_rate_l5":0.6,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"away pass off vs home pass def","edge":0.343},{"matchup":"away rush off vs home rush def","edge":0.281},{"matchup":"home rz vs away rz def","edge":-0.147},{"matchup":"home rush off vs away rush def","edge":-0.129},{"matchup":"away rz vs home rz def","edge":0.129},{"matchup":"away expl vs home expl def","edge":0.039},{"matchup":"home pass off vs away pass def","edge":0.036},{"matchup":"home pass-rush edge","edge":0.033}],"drivers":{"win":[{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.567,"impact":-0.131,"direction":"favors BUF"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.096,"impact":-0.077,"direction":"favors BUF"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":-0.021,"impact":0.068,"direction":"favors HOU"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":-0.03,"impact":0.067,"direction":"favors HOU"},{"feature":"home_def_power","label":"home defensive power","value":1.987,"impact":0.067,"direction":"favors HOU"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":0.406,"impact":-0.066,"direction":"favors BUF"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":-0.032,"impact":-0.066,"direction":"favors BUF"},{"feature":"d_adj_def_success_rate_l3","label":"gap in opponent-adjusted defensive success rate (last 3)","value":-0.115,"impact":0.064,"direction":"favors HOU"},{"feature":"away_off_power","label":"away offensive power","value":1.766,"impact":-0.059,"direction":"favors BUF"},{"feature":"d_off_points_per_drive_l3","label":"gap in offensive points per drive (last 3)","value":-1.346,"impact":0.057,"direction":"favors HOU"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":0.071,"impact":0.05,"direction":"favors HOU"},{"feature":"d_def_turnovers_per_play_ewma","label":"gap in defensive turnovers per play (recency-weighted)","value":0.011,"impact":0.05,"direction":"favors HOU"}],"margin":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.096,"impact":-1.409,"direction":"favors BUF"},{"feature":"mm_away_rush_off_vs_home_rush_def","label":"away rush off vs home rush def","value":0.281,"impact":-0.867,"direction":"favors BUF"},{"feature":"d_def_turnovers_per_play_l3","label":"gap in defensive turnovers per play (last 3)","value":0.026,"impact":0.736,"direction":"favors HOU"},{"feature":"d_off_points_per_drive_l3","label":"gap in offensive points per drive (last 3)","value":-1.346,"impact":0.522,"direction":"favors HOU"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":-0.283,"impact":0.517,"direction":"favors HOU"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.567,"impact":-0.516,"direction":"favors BUF"},{"feature":"d_off_rush_sr_ewma","label":"gap in offensive rush success rate (recency-weighted)","value":-0.11,"impact":-0.444,"direction":"favors BUF"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-2.978,"impact":-0.412,"direction":"favors BUF"},{"feature":"d_off_third_down_rate_ewma","label":"gap in offensive 3rd-down conversion rate (recency-weighted)","value":-0.069,"impact":-0.385,"direction":"favors BUF"},{"feature":"away_power","label":"away power","value":1.71,"impact":-0.372,"direction":"favors BUF"},{"feature":"d_adj_off_points_per_drive_l3","label":"gap in opponent-adjusted offensive points per drive (last 3)","value":-1.471,"impact":0.356,"direction":"favors HOU"},{"feature":"d_off_sec_per_play_ewma","label":"gap in offensive seconds per play (pace) (recency-weighted)","value":-4.604,"impact":0.319,"direction":"favors HOU"}],"total":[{"feature":"pace_projection","label":"projected pace","value":31.62,"impact":-1.427,"direction":"lower scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.567,"impact":1.278,"direction":"higher scoring"},{"feature":"home_def_power","label":"home defensive power","value":1.987,"impact":-1.119,"direction":"lower scoring"},{"feature":"away_off_power","label":"away offensive power","value":1.766,"impact":0.781,"direction":"higher scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-2.641,"impact":-0.681,"direction":"lower scoring"},{"feature":"home_off_power","label":"home offensive power","value":-0.635,"impact":-0.612,"direction":"lower scoring"},{"feature":"wind_mph","label":"wind speed","value":null,"impact":-0.458,"direction":"lower scoring"},{"feature":"away_qb_impact","label":"away QB impact","value":0.014,"impact":-0.419,"direction":"lower scoring"},{"feature":"d_def_sack_rate_ewma","label":"gap in defensive sack rate (recency-weighted)","value":0.048,"impact":0.394,"direction":"higher scoring"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":-8.16,"impact":0.33,"direction":"higher scoring"},{"feature":"plays_projection","label":"projected play volume","value":67.503,"impact":0.304,"direction":"higher scoring"},{"feature":"d_off_cpoe_l3","label":"gap in offensive completion % over expected (last 3)","value":-19.762,"impact":-0.293,"direction":"lower scoring"}]},"uncertainty":{"win_prob_member_sd":0.0338,"margin_member_sd":0.96,"member_win_probs":{"xgb":0.4613,"lgb":0.544,"linear":0.5056}},"flags":[]},{"game":{"game_id":"2026_01_CHI_CAR","season":2026,"week":1,"home_team":"CAR","away_team":"CHI","kickoff":"2026-09-13","stadium":"Bank of America Stadium"},"prediction":{"home_win_prob":0.3015,"away_win_prob":0.6985,"predicted_margin_home":-4.62,"model_spread_home":4.62,"predicted_total":44.7,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":2.5,"market_home_favored_by":-2.5,"market_total":46.5,"market_home_win_prob":0.4279,"spread_edge_points":-2.12,"total_edge_points":-1.8,"win_prob_edge":-0.1265,"recommended_side":"CHI -2.5","recommended_total":"Under 46.5"},"environment":{"roof":"outdoors","surface":"grass","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"early","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":586.0,"divisional":false,"projected_pace_sec_per_play":31.64,"projected_scoring_env":4.12},"team_form":{"CAR":{"power_rating":-1.01,"offense_rating":-0.52,"defense_rating":-0.49,"qb_impact":-0.078,"qb_epa_per_dropback_l5":-0.078,"off_epa_ewma":-0.052,"def_epa_ewma":0.071,"explosive_rate":0.07,"rz_td_rate":0.637,"win_rate_l5":0.2,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"CHI":{"power_rating":0.12,"offense_rating":0.63,"defense_rating":-0.51,"qb_impact":0.17,"qb_epa_per_dropback_l5":0.17,"off_epa_ewma":0.072,"def_epa_ewma":0.065,"explosive_rate":0.097,"rz_td_rate":0.611,"win_rate_l5":0.4,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home rush off vs away rush def","edge":-0.12},{"matchup":"home pass off vs away pass def","edge":-0.119},{"matchup":"away rush off vs home rush def","edge":-0.036},{"matchup":"home pass-rush edge","edge":0.032},{"matchup":"home expl vs away expl def","edge":-0.031},{"matchup":"away rz vs home rz def","edge":0.031},{"matchup":"away expl vs home expl def","edge":0.026},{"matchup":"home rz vs away rz def","edge":0.021}],"drivers":{"win":[{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.124,"impact":-0.124,"direction":"favors CHI"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":-6.139,"impact":-0.12,"direction":"favors CHI"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.151,"impact":-0.107,"direction":"favors CHI"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":-0.026,"impact":0.076,"direction":"favors CAR"},{"feature":"d_def_yards_per_play_l5","label":"gap in defensive yards per play (last 5)","value":-0.772,"impact":0.064,"direction":"favors CAR"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-4.957,"impact":-0.056,"direction":"favors CHI"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":0.144,"impact":-0.054,"direction":"favors CHI"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":9.0,"impact":0.044,"direction":"favors CAR"},{"feature":"d_penalty_yards_l3","label":"gap in penalty yards (last 3)","value":15.667,"impact":0.042,"direction":"favors CAR"},{"feature":"d_off_plays_l5","label":"gap in offensive plays run (last 5)","value":-13.6,"impact":-0.041,"direction":"favors CHI"},{"feature":"d_off_rz_td_rate_l5","label":"gap in offensive red-zone TD rate (last 5)","value":0.22,"impact":-0.04,"direction":"favors CHI"},{"feature":"d_adj_off_success_rate_ewma","label":"gap in opponent-adjusted offensive success rate (recency-weighted)","value":-0.031,"impact":-0.04,"direction":"favors CHI"}],"margin":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":-6.139,"impact":-1.474,"direction":"favors CHI"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.151,"impact":-1.088,"direction":"favors CHI"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":0.144,"impact":-0.529,"direction":"favors CHI"},{"feature":"d_coach_margin","label":"gap in coach margin","value":-8.992,"impact":-0.526,"direction":"favors CHI"},{"feature":"d_def_early_down_epa_l3","label":"gap in defensive early-down EPA/play (last 3)","value":-0.126,"impact":-0.387,"direction":"favors CHI"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-4.957,"impact":-0.363,"direction":"favors CHI"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.124,"impact":-0.338,"direction":"favors CHI"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":9.0,"impact":0.326,"direction":"favors CAR"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":-0.026,"impact":0.312,"direction":"favors CAR"},{"feature":"d_def_epa_per_play_l5","label":"gap in defensive EPA per play (last 5)","value":-0.098,"impact":-0.289,"direction":"favors CHI"},{"feature":"d_off_third_down_rate_ewma","label":"gap in offensive 3rd-down conversion rate (recency-weighted)","value":-0.101,"impact":-0.261,"direction":"favors CHI"},{"feature":"d_off_early_down_epa_ewma","label":"gap in offensive early-down EPA/play (recency-weighted)","value":-0.118,"impact":-0.259,"direction":"favors CHI"}],"total":[{"feature":"pace_projection","label":"projected pace","value":31.642,"impact":-1.338,"direction":"lower scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.124,"impact":0.874,"direction":"higher scoring"},{"feature":"wind_mph","label":"wind speed","value":null,"impact":-0.689,"direction":"lower scoring"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":-0.26,"impact":0.657,"direction":"higher scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-2.668,"impact":-0.598,"direction":"lower scoring"},{"feature":"home_def_power","label":"home defensive power","value":-0.487,"impact":0.511,"direction":"higher scoring"},{"feature":"home_off_power","label":"home offensive power","value":-0.518,"impact":-0.453,"direction":"lower scoring"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":-3.977,"impact":0.439,"direction":"higher scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":-0.078,"impact":-0.419,"direction":"lower scoring"},{"feature":"away_qb_impact","label":"away QB impact","value":0.17,"impact":0.397,"direction":"higher scoring"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":0.03,"impact":0.384,"direction":"higher scoring"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":1.968,"impact":0.371,"direction":"higher scoring"}]},"uncertainty":{"win_prob_member_sd":0.0254,"margin_member_sd":1.89,"member_win_probs":{"xgb":0.3722,"lgb":0.3462,"linear":0.3104}},"flags":[]},{"game":{"game_id":"2026_01_CLE_JAX","season":2026,"week":1,"home_team":"JAX","away_team":"CLE","kickoff":"2026-09-13","stadium":"EverBank Stadium"},"prediction":{"home_win_prob":0.72,"away_win_prob":0.28,"predicted_margin_home":5.97,"model_spread_home":-5.97,"predicted_total":41.95,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-7.5,"market_home_favored_by":7.5,"market_total":40.5,"market_home_win_prob":0.7572,"spread_edge_points":-1.53,"total_edge_points":1.45,"win_prob_edge":-0.0372,"recommended_side":"CLE +7.5","recommended_total":"Over 40.5"},"environment":{"roof":"outdoors","surface":"grass","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"early","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":773.0,"divisional":false,"projected_pace_sec_per_play":31.4,"projected_scoring_env":3.74},"team_form":{"JAX":{"power_rating":1.8,"offense_rating":0.82,"defense_rating":0.98,"qb_impact":0.295,"qb_epa_per_dropback_l5":0.295,"off_epa_ewma":0.075,"def_epa_ewma":-0.086,"explosive_rate":0.1,"rz_td_rate":0.696,"win_rate_l5":0.8,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"CLE":{"power_rating":-1.46,"offense_rating":-2.22,"defense_rating":0.75,"qb_impact":-0.218,"qb_epa_per_dropback_l5":-0.272,"off_epa_ewma":-0.196,"def_epa_ewma":-0.084,"explosive_rate":0.062,"rz_td_rate":0.333,"win_rate_l5":0.4,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home pass off vs away pass def","edge":0.367},{"matchup":"away rz vs home rz def","edge":-0.298},{"matchup":"home rush off vs away rush def","edge":-0.145},{"matchup":"away pass off vs home pass def","edge":-0.119},{"matchup":"home rz vs away rz def","edge":0.113},{"matchup":"away rush off vs home rush def","edge":-0.103},{"matchup":"home pass-rush edge","edge":-0.054},{"matchup":"away pass-rush edge","edge":0.027}],"drivers":{"win":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":15.673,"impact":0.328,"direction":"favors JAX"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.311,"impact":0.159,"direction":"favors JAX"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":13.578,"impact":0.122,"direction":"favors JAX"},{"feature":"home_def_power","label":"home defensive power","value":0.976,"impact":0.079,"direction":"favors JAX"},{"feature":"d_adj_def_success_rate_l3","label":"gap in opponent-adjusted defensive success rate (last 3)","value":-0.119,"impact":0.069,"direction":"favors JAX"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":-0.013,"impact":0.066,"direction":"favors JAX"},{"feature":"d_off_cpoe_ewma","label":"gap in offensive completion % over expected (recency-weighted)","value":5.782,"impact":-0.066,"direction":"favors CLE"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":-0.053,"impact":0.062,"direction":"favors JAX"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":-0.023,"impact":-0.06,"direction":"favors CLE"},{"feature":"d_off_turnovers_per_play_l5","label":"gap in offensive turnovers per play (last 5)","value":-0.018,"impact":0.056,"direction":"favors JAX"},{"feature":"d_adj_off_points_per_drive_ewma","label":"gap in opponent-adjusted offensive points per drive (recency-weighted)","value":1.499,"impact":0.052,"direction":"favors JAX"},{"feature":"pace_projection","label":"projected pace","value":31.396,"impact":-0.051,"direction":"favors CLE"}],"margin":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":15.673,"impact":3.642,"direction":"favors JAX"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.311,"impact":0.991,"direction":"favors JAX"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":13.578,"impact":0.566,"direction":"favors JAX"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":0.55,"impact":-0.424,"direction":"favors CLE"},{"feature":"d_adj_off_success_rate_ewma","label":"gap in opponent-adjusted offensive success rate (recency-weighted)","value":0.122,"impact":0.393,"direction":"favors JAX"},{"feature":"d_margin_std","label":"gap in scoring margin (season to date)","value":0.0,"impact":-0.362,"direction":"favors CLE"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":5.801,"impact":0.335,"direction":"favors JAX"},{"feature":"home_power","label":"home power","value":1.798,"impact":0.334,"direction":"favors JAX"},{"feature":"d_off_turnovers_per_play_l5","label":"gap in offensive turnovers per play (last 5)","value":-0.018,"impact":0.323,"direction":"favors JAX"},{"feature":"plays_projection","label":"projected play volume","value":61.48,"impact":-0.309,"direction":"favors CLE"},{"feature":"d_margin_l5","label":"gap in scoring margin (last 5)","value":20.6,"impact":0.288,"direction":"favors JAX"},{"feature":"d_coach_margin","label":"gap in coach margin","value":null,"impact":-0.272,"direction":"favors CLE"}],"total":[{"feature":"pace_projection","label":"projected pace","value":31.396,"impact":-1.436,"direction":"lower scoring"},{"feature":"mm_home_pressure_edge","label":"home pass-rush edge","value":-0.054,"impact":-0.829,"direction":"lower scoring"},{"feature":"away_def_power","label":"away defensive power","value":0.752,"impact":-0.808,"direction":"lower scoring"},{"feature":"home_def_power","label":"home defensive power","value":0.976,"impact":-0.802,"direction":"lower scoring"},{"feature":"wind_mph","label":"wind speed","value":null,"impact":-0.7,"direction":"lower scoring"},{"feature":"home_off_power","label":"home offensive power","value":0.821,"impact":0.682,"direction":"higher scoring"},{"feature":"d_adj_off_pass_epa_l3","label":"gap in opponent-adjusted offensive passing EPA/play (last 3)","value":0.432,"impact":-0.586,"direction":"lower scoring"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":null,"impact":-0.544,"direction":"lower scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":0.295,"impact":0.479,"direction":"higher scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":0.354,"impact":0.459,"direction":"higher scoring"},{"feature":"plays_projection","label":"projected play volume","value":61.48,"impact":-0.45,"direction":"lower scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":3.741,"impact":-0.433,"direction":"lower scoring"}]},"uncertainty":{"win_prob_member_sd":0.0136,"margin_member_sd":1.71,"member_win_probs":{"xgb":0.7248,"lgb":0.7538,"linear":0.7253}},"flags":["CLE has an unsustainable recent turnover margin (-1.4/game)."]},{"game":{"game_id":"2026_01_DAL_NYG","season":2026,"week":1,"home_team":"NYG","away_team":"DAL","kickoff":"2026-09-13","stadium":"MetLife Stadium"},"prediction":{"home_win_prob":0.3857,"away_win_prob":0.6143,"predicted_margin_home":2.29,"model_spread_home":-2.29,"predicted_total":48.38,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":2.5,"market_home_favored_by":-2.5,"market_total":48.5,"market_home_win_prob":0.4279,"spread_edge_points":4.79,"total_edge_points":-0.12,"win_prob_edge":-0.0422,"recommended_side":"NYG +2.5","recommended_total":"Under 48.5"},"environment":{"roof":"outdoors","surface":"fieldturf","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"primetime","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":1385.0,"divisional":true,"projected_pace_sec_per_play":29.43,"projected_scoring_env":4.68},"team_form":{"NYG":{"power_rating":-0.46,"offense_rating":0.16,"defense_rating":-0.63,"qb_impact":-0.123,"qb_epa_per_dropback_l5":-0.123,"off_epa_ewma":0.049,"def_epa_ewma":0.031,"explosive_rate":0.088,"rz_td_rate":0.469,"win_rate_l5":0.4,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"DAL":{"power_rating":-1.56,"offense_rating":0.62,"defense_rating":-2.18,"qb_impact":0.224,"qb_epa_per_dropback_l5":0.224,"off_epa_ewma":0.066,"def_epa_ewma":0.177,"explosive_rate":0.088,"rz_td_rate":0.55,"win_rate_l5":0.2,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home pass off vs away pass def","edge":-0.194},{"matchup":"home rz vs away rz def","edge":-0.155},{"matchup":"away pass off vs home pass def","edge":0.086},{"matchup":"away rush off vs home rush def","edge":-0.074},{"matchup":"home rush off vs away rush def","edge":-0.059},{"matchup":"away pass-rush edge","edge":-0.035},{"matchup":"away rz vs home rz def","edge":-0.033},{"matchup":"home expl vs away expl def","edge":-0.024}],"drivers":{"win":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":5.894,"impact":0.188,"direction":"favors NYG"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.166,"impact":-0.148,"direction":"favors DAL"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.679,"impact":-0.125,"direction":"favors DAL"},{"feature":"d_def_epa_per_play_l3","label":"gap in defensive EPA per play (last 3)","value":-0.393,"impact":-0.109,"direction":"favors DAL"},{"feature":"d_momentum","label":"momentum gap","value":21.667,"impact":-0.097,"direction":"favors DAL"},{"feature":"d_qb_sack_rate_l5","label":"gap in QB sack rate (last 5)","value":0.047,"impact":0.075,"direction":"favors NYG"},{"feature":"d_coach_margin","label":"gap in coach margin","value":7.539,"impact":0.074,"direction":"favors NYG"},{"feature":"d_def_turnovers_per_play_ewma","label":"gap in defensive turnovers per play (recency-weighted)","value":0.013,"impact":0.069,"direction":"favors NYG"},{"feature":"d_def_yards_per_play_l3","label":"gap in defensive yards per play (last 3)","value":-2.186,"impact":0.06,"direction":"favors NYG"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-1.177,"impact":-0.059,"direction":"favors DAL"},{"feature":"d_adj_off_points_per_drive_ewma","label":"gap in opponent-adjusted offensive points per drive (recency-weighted)","value":-0.237,"impact":-0.05,"direction":"favors DAL"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":0.197,"impact":0.048,"direction":"favors NYG"}],"margin":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.166,"impact":-1.31,"direction":"favors DAL"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":5.894,"impact":1.3,"direction":"favors NYG"},{"feature":"d_def_turnovers_per_play_l3","label":"gap in defensive turnovers per play (last 3)","value":0.031,"impact":0.957,"direction":"favors NYG"},{"feature":"d_coach_games","label":"gap in coach games","value":300.0,"impact":0.616,"direction":"favors NYG"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.679,"impact":-0.45,"direction":"favors DAL"},{"feature":"d_def_early_down_epa_l3","label":"gap in defensive early-down EPA/play (last 3)","value":-0.569,"impact":0.44,"direction":"favors NYG"},{"feature":"d_def_early_down_epa_ewma","label":"gap in defensive early-down EPA/play (recency-weighted)","value":-0.159,"impact":0.412,"direction":"favors NYG"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":-0.278,"impact":0.385,"direction":"favors NYG"},{"feature":"d_momentum","label":"momentum gap","value":21.667,"impact":-0.384,"direction":"favors DAL"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":-131.0,"impact":-0.368,"direction":"favors DAL"},{"feature":"home_qb_impact","label":"home QB impact","value":-0.123,"impact":-0.346,"direction":"favors DAL"},{"feature":"d_coach_margin","label":"gap in coach margin","value":7.539,"impact":0.325,"direction":"favors NYG"}],"total":[{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.679,"impact":1.667,"direction":"higher scoring"},{"feature":"away_def_power","label":"away defensive power","value":-2.184,"impact":1.291,"direction":"higher scoring"},{"feature":"away_qb_impact","label":"away QB impact","value":0.224,"impact":0.663,"direction":"higher scoring"},{"feature":"wind_mph","label":"wind speed","value":null,"impact":-0.623,"direction":"lower scoring"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":-0.794,"impact":0.583,"direction":"higher scoring"},{"feature":"d_adj_def_epa_per_play_l3","label":"gap in opponent-adjusted defensive EPA per play (last 3)","value":-0.398,"impact":-0.53,"direction":"lower scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":-0.123,"impact":-0.492,"direction":"lower scoring"},{"feature":"d_coach_games","label":"gap in coach games","value":300.0,"impact":-0.484,"direction":"lower scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-3.691,"impact":-0.478,"direction":"lower scoring"},{"feature":"pace_projection","label":"projected pace","value":29.426,"impact":0.38,"direction":"higher scoring"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":0.041,"impact":0.37,"direction":"higher scoring"},{"feature":"d_def_explosive_rate_l5","label":"gap in defensive explosive play rate (last 5)","value":-0.034,"impact":-0.363,"direction":"lower scoring"}]},"uncertainty":{"win_prob_member_sd":0.0474,"margin_member_sd":1.34,"member_win_probs":{"xgb":0.4778,"lgb":0.4925,"linear":0.3854}},"flags":["Model line differs from market by 4.8 points (home side) - verify no late news is missing."]},{"game":{"game_id":"2026_01_DEN_KC","season":2026,"week":1,"home_team":"KC","away_team":"DEN","kickoff":"2026-09-14","stadium":"GEHA Field at Arrowhead Stadium"},"prediction":{"home_win_prob":0.3015,"away_win_prob":0.6985,"predicted_margin_home":-2.57,"model_spread_home":2.57,"predicted_total":41.42,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-3.0,"market_home_favored_by":3.0,"market_total":42.5,"market_home_win_prob":0.583,"spread_edge_points":-5.57,"total_edge_points":-1.08,"win_prob_edge":-0.2815,"recommended_side":"DEN +3.0","recommended_total":"Under 42.5"},"environment":{"roof":"outdoors","surface":"grass","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"primetime","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":564.0,"divisional":true,"projected_pace_sec_per_play":29.6,"projected_scoring_env":3.57},"team_form":{"KC":{"power_rating":-0.66,"offense_rating":-1.12,"defense_rating":0.47,"qb_impact":-0.146,"qb_epa_per_dropback_l5":-0.487,"off_epa_ewma":-0.107,"def_epa_ewma":-0.054,"explosive_rate":0.062,"rz_td_rate":0.47,"win_rate_l5":0.0,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"DEN":{"power_rating":1.08,"offense_rating":-0.24,"defense_rating":1.32,"qb_impact":-0.042,"qb_epa_per_dropback_l5":-0.07,"off_epa_ewma":-0.025,"def_epa_ewma":-0.074,"explosive_rate":0.07,"rz_td_rate":0.451,"win_rate_l5":0.6,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"away rush off vs home rush def","edge":0.045},{"matchup":"home pass off vs away pass def","edge":-0.041},{"matchup":"home rz vs away rz def","edge":-0.03},{"matchup":"home pass-rush edge","edge":0.019},{"matchup":"away rz vs home rz def","edge":-0.018},{"matchup":"home expl vs away expl def","edge":-0.011},{"matchup":"home rush off vs away rush def","edge":-0.009},{"matchup":"away pass off vs home pass def","edge":-0.004}],"drivers":{"win":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.375,"impact":-0.384,"direction":"favors DEN"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":-6.17,"impact":-0.143,"direction":"favors DEN"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":-0.045,"impact":-0.071,"direction":"favors DEN"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-4.631,"impact":-0.065,"direction":"favors DEN"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":3.571,"impact":0.064,"direction":"favors KC"},{"feature":"d_qb_sack_rate_l5","label":"gap in QB sack rate (last 5)","value":0.048,"impact":0.059,"direction":"favors KC"},{"feature":"away_def_power","label":"away defensive power","value":1.323,"impact":0.055,"direction":"favors KC"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":0.083,"impact":-0.053,"direction":"favors DEN"},{"feature":"d_off_plays_l5","label":"gap in offensive plays run (last 5)","value":-9.4,"impact":-0.052,"direction":"favors DEN"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":0.006,"impact":0.052,"direction":"favors KC"},{"feature":"d_power","label":"overall power rating gap","value":-1.736,"impact":-0.051,"direction":"favors DEN"},{"feature":"d_ats_rate_l5","label":"gap in ats rate (last 5)","value":-0.4,"impact":0.043,"direction":"favors KC"}],"margin":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.375,"impact":-1.938,"direction":"favors DEN"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":-6.17,"impact":-1.673,"direction":"favors DEN"},{"feature":"expected_pressure_rate","label":"projected pressure rate","value":0.081,"impact":0.681,"direction":"favors KC"},{"feature":"d_coach_margin","label":"gap in coach margin","value":0.394,"impact":0.504,"direction":"favors KC"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-4.631,"impact":-0.438,"direction":"favors DEN"},{"feature":"d_ats_rate_l5","label":"gap in ats rate (last 5)","value":-0.4,"impact":0.354,"direction":"favors KC"},{"feature":"away_power","label":"away power","value":1.078,"impact":-0.344,"direction":"favors DEN"},{"feature":"d_def_early_down_epa_std","label":"gap in defensive early-down EPA/play (season to date)","value":0.0,"impact":-0.335,"direction":"favors DEN"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":3.571,"impact":0.323,"direction":"favors KC"},{"feature":"expected_explosive_rate","label":"projected explosive-play rate","value":0.066,"impact":0.296,"direction":"favors KC"},{"feature":"d_power","label":"overall power rating gap","value":-1.736,"impact":-0.285,"direction":"favors DEN"},{"feature":"away_def_power","label":"away defensive power","value":1.323,"impact":0.257,"direction":"favors KC"}],"total":[{"feature":"expected_explosive_rate","label":"projected explosive-play rate","value":0.066,"impact":-1.446,"direction":"lower scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":3.571,"impact":-1.137,"direction":"lower scoring"},{"feature":"away_def_power","label":"away defensive power","value":1.323,"impact":-0.893,"direction":"lower scoring"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":0.06,"impact":0.684,"direction":"higher scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":-0.146,"impact":-0.613,"direction":"lower scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":1.966,"impact":0.573,"direction":"higher scoring"},{"feature":"home_off_power","label":"home offensive power","value":-1.125,"impact":-0.475,"direction":"lower scoring"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":0.293,"impact":0.462,"direction":"higher scoring"},{"feature":"wind_mph","label":"wind speed","value":null,"impact":-0.454,"direction":"lower scoring"},{"feature":"away_qb_impact","label":"away QB impact","value":-0.042,"impact":-0.407,"direction":"lower scoring"},{"feature":"plays_projection","label":"projected play volume","value":62.87,"impact":-0.362,"direction":"lower scoring"},{"feature":"pace_projection","label":"projected pace","value":29.597,"impact":0.281,"direction":"higher scoring"}]},"uncertainty":{"win_prob_member_sd":0.0546,"margin_member_sd":0.52,"member_win_probs":{"xgb":0.3423,"lgb":0.2212,"linear":0.2326}},"flags":["Model line differs from market by 5.6 points (away side) - verify no late news is missing."]},{"game":{"game_id":"2026_01_GB_MIN","season":2026,"week":1,"home_team":"MIN","away_team":"GB","kickoff":"2026-09-13","stadium":"U.S. Bank Stadium"},"prediction":{"home_win_prob":0.3857,"away_win_prob":0.6143,"predicted_margin_home":0.03,"model_spread_home":-0.03,"predicted_total":45.62,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-1.5,"market_home_favored_by":1.5,"market_total":45.5,"market_home_win_prob":0.5174,"spread_edge_points":-1.47,"total_edge_points":0.12,"win_prob_edge":-0.1316,"recommended_side":"GB +1.5","recommended_total":"Over 45.5"},"environment":{"roof":"dome","surface":"sportturf","indoor":true,"wind_mph":0.0,"temp_f":68.0,"weather_impact":0.0,"kickoff_bucket":"late_afternoon","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":257.0,"divisional":true,"projected_pace_sec_per_play":31.16,"projected_scoring_env":4.13},"team_form":{"MIN":{"power_rating":1.27,"offense_rating":-0.89,"defense_rating":2.16,"qb_impact":-0.001,"qb_epa_per_dropback_l5":-0.001,"off_epa_ewma":-0.094,"def_epa_ewma":-0.168,"explosive_rate":0.078,"rz_td_rate":0.543,"win_rate_l5":1.0,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"GB":{"power_rating":0.16,"offense_rating":1.01,"defense_rating":-0.84,"qb_impact":0.295,"qb_epa_per_dropback_l5":0.295,"off_epa_ewma":0.083,"def_epa_ewma":0.071,"explosive_rate":0.113,"rz_td_rate":0.574,"win_rate_l5":0.0,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"away pass off vs home pass def","edge":0.403},{"matchup":"home pass off vs away pass def","edge":-0.302},{"matchup":"away rz vs home rz def","edge":0.188},{"matchup":"away pass-rush edge","edge":-0.07},{"matchup":"home pass-rush edge","edge":0.06},{"matchup":"away expl vs home expl def","edge":0.046},{"matchup":"away rush off vs home rush def","edge":-0.03},{"matchup":"home rz vs away rz def","edge":0.026}],"drivers":{"win":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.405,"impact":-0.358,"direction":"favors GB"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":6.682,"impact":0.205,"direction":"favors MIN"},{"feature":"d_def_yards_per_play_ewma","label":"gap in defensive yards per play (recency-weighted)","value":-1.226,"impact":0.179,"direction":"favors MIN"},{"feature":"d_def_epa_per_play_l3","label":"gap in defensive EPA per play (last 3)","value":-0.497,"impact":-0.109,"direction":"favors GB"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.131,"impact":-0.101,"direction":"favors GB"},{"feature":"d_momentum","label":"momentum gap","value":21.0,"impact":-0.073,"direction":"favors GB"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":-0.032,"impact":0.068,"direction":"favors MIN"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-1.81,"impact":-0.068,"direction":"favors GB"},{"feature":"home_def_power","label":"home defensive power","value":2.156,"impact":0.067,"direction":"favors MIN"},{"feature":"expected_explosive_rate","label":"projected explosive-play rate","value":0.096,"impact":-0.062,"direction":"favors GB"},{"feature":"d_qb_sack_rate_l5","label":"gap in QB sack rate (last 5)","value":0.072,"impact":0.06,"direction":"favors MIN"},{"feature":"pace_projection","label":"projected pace","value":31.158,"impact":-0.056,"direction":"favors GB"}],"margin":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.405,"impact":-1.887,"direction":"favors GB"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":6.682,"impact":1.148,"direction":"favors MIN"},{"feature":"expected_pressure_rate","label":"projected pressure rate","value":0.088,"impact":1.037,"direction":"favors MIN"},{"feature":"d_def_turnovers_per_play_l3","label":"gap in defensive turnovers per play (last 3)","value":0.024,"impact":0.698,"direction":"favors MIN"},{"feature":"d_off_third_down_rate_ewma","label":"gap in offensive 3rd-down conversion rate (recency-weighted)","value":-0.135,"impact":-0.614,"direction":"favors GB"},{"feature":"d_def_yards_per_play_ewma","label":"gap in defensive yards per play (recency-weighted)","value":-1.226,"impact":0.592,"direction":"favors MIN"},{"feature":"d_def_qb_hit_rate_l5","label":"gap in defensive QB hit rate (last 5)","value":0.087,"impact":0.523,"direction":"favors MIN"},{"feature":"d_momentum","label":"momentum gap","value":21.0,"impact":-0.499,"direction":"favors GB"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-1.81,"impact":-0.45,"direction":"favors GB"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":-40.0,"impact":-0.384,"direction":"favors GB"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.131,"impact":-0.367,"direction":"favors GB"},{"feature":"d_def_epa_per_play_l3","label":"gap in defensive EPA per play (last 3)","value":-0.497,"impact":-0.361,"direction":"favors GB"}],"total":[{"feature":"pace_projection","label":"projected pace","value":31.158,"impact":-1.276,"direction":"lower scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.131,"impact":1.174,"direction":"higher scoring"},{"feature":"away_def_power","label":"away defensive power","value":-0.843,"impact":1.049,"direction":"higher scoring"},{"feature":"home_def_power","label":"home defensive power","value":2.156,"impact":-1.037,"direction":"lower scoring"},{"feature":"wind_mph","label":"wind speed","value":0.0,"impact":0.849,"direction":"higher scoring"},{"feature":"away_qb_impact","label":"away QB impact","value":0.295,"impact":0.75,"direction":"higher scoring"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":0.033,"impact":0.596,"direction":"higher scoring"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":-7.234,"impact":-0.59,"direction":"lower scoring"},{"feature":"d_def_sack_rate_ewma","label":"gap in defensive sack rate (recency-weighted)","value":0.083,"impact":0.524,"direction":"higher scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-2.348,"impact":-0.495,"direction":"lower scoring"},{"feature":"d_adj_def_epa_per_play_l3","label":"gap in opponent-adjusted defensive EPA per play (last 3)","value":-0.548,"impact":-0.492,"direction":"lower scoring"},{"feature":"home_off_power","label":"home offensive power","value":-0.888,"impact":-0.439,"direction":"lower scoring"}]},"uncertainty":{"win_prob_member_sd":0.0402,"margin_member_sd":1.17,"member_win_probs":{"xgb":0.464,"lgb":0.4891,"linear":0.394}},"flags":[]},{"game":{"game_id":"2026_01_MIA_LV","season":2026,"week":1,"home_team":"LV","away_team":"MIA","kickoff":"2026-09-13","stadium":"Allegiant Stadium"},"prediction":{"home_win_prob":0.525,"away_win_prob":0.475,"predicted_margin_home":-2.72,"model_spread_home":2.72,"predicted_total":45.07,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-3.5,"market_home_favored_by":3.5,"market_total":40.5,"market_home_win_prob":0.6309,"spread_edge_points":-6.22,"total_edge_points":4.57,"win_prob_edge":-0.1059,"recommended_side":"MIA +3.5","recommended_total":"Over 40.5"},"environment":{"roof":"dome","surface":"grass","indoor":true,"wind_mph":0.0,"temp_f":68.0,"weather_impact":0.0,"kickoff_bucket":"late_afternoon","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":2171.0,"divisional":false,"projected_pace_sec_per_play":32.49,"projected_scoring_env":3.08},"team_form":{"LV":{"power_rating":-2.23,"offense_rating":-2.1,"defense_rating":-0.13,"qb_impact":-0.035,"qb_epa_per_dropback_l5":-0.035,"off_epa_ewma":-0.233,"def_epa_ewma":-0.013,"explosive_rate":0.056,"rz_td_rate":0.566,"win_rate_l5":0.2,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"MIA":{"power_rating":-1.58,"offense_rating":-0.42,"defense_rating":-1.17,"qb_impact":0.003,"qb_epa_per_dropback_l5":0.011,"off_epa_ewma":-0.047,"def_epa_ewma":0.09,"explosive_rate":0.104,"rz_td_rate":0.566,"win_rate_l5":0.4,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home pass off vs away pass def","edge":-0.371},{"matchup":"home rush off vs away rush def","edge":-0.262},{"matchup":"away pass off vs home pass def","edge":-0.109},{"matchup":"away rz vs home rz def","edge":0.075},{"matchup":"home rz vs away rz def","edge":-0.067},{"matchup":"away pass-rush edge","edge":-0.049},{"matchup":"home expl vs away expl def","edge":-0.038},{"matchup":"away expl vs home expl def","edge":0.025}],"drivers":{"win":[{"feature":"d_def_yards_per_play_ewma","label":"gap in defensive yards per play (recency-weighted)","value":-1.024,"impact":0.133,"direction":"favors LV"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":-5.366,"impact":-0.123,"direction":"favors MIA"},{"feature":"d_def_epa_per_play_l3","label":"gap in defensive EPA per play (last 3)","value":-0.354,"impact":-0.101,"direction":"favors MIA"},{"feature":"d_momentum","label":"momentum gap","value":8.333,"impact":-0.088,"direction":"favors MIA"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-6.056,"impact":-0.072,"direction":"favors MIA"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":3.083,"impact":0.065,"direction":"favors LV"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":-0.006,"impact":0.064,"direction":"favors LV"},{"feature":"d_adj_def_success_rate_l3","label":"gap in opponent-adjusted defensive success rate (last 3)","value":-0.159,"impact":0.063,"direction":"favors LV"},{"feature":"d_def_third_down_rate_l5","label":"gap in defensive 3rd-down conversion rate (last 5)","value":0.129,"impact":-0.057,"direction":"favors MIA"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.057,"impact":-0.054,"direction":"favors MIA"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":0.047,"impact":0.054,"direction":"favors LV"},{"feature":"d_def_yards_per_play_l5","label":"gap in defensive yards per play (last 5)","value":-1.177,"impact":0.05,"direction":"favors LV"}],"margin":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":-5.366,"impact":-1.658,"direction":"favors MIA"},{"feature":"d_def_yards_per_play_ewma","label":"gap in defensive yards per play (recency-weighted)","value":-1.024,"impact":0.753,"direction":"favors LV"},{"feature":"home_off_power","label":"home offensive power","value":-2.098,"impact":-0.666,"direction":"favors MIA"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":21.0,"impact":0.525,"direction":"favors LV"},{"feature":"d_def_epa_per_play_l3","label":"gap in defensive EPA per play (last 3)","value":-0.354,"impact":-0.521,"direction":"favors MIA"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.057,"impact":-0.495,"direction":"favors MIA"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":-6.056,"impact":-0.451,"direction":"favors MIA"},{"feature":"d_off_turnovers_per_play_l5","label":"gap in offensive turnovers per play (last 5)","value":-0.003,"impact":-0.445,"direction":"favors MIA"},{"feature":"d_def_third_down_rate_l5","label":"gap in defensive 3rd-down conversion rate (last 5)","value":0.129,"impact":-0.441,"direction":"favors MIA"},{"feature":"d_off_rush_sr_ewma","label":"gap in offensive rush success rate (recency-weighted)","value":-0.101,"impact":-0.43,"direction":"favors MIA"},{"feature":"d_def_early_down_epa_ewma","label":"gap in defensive early-down EPA/play (recency-weighted)","value":-0.153,"impact":0.416,"direction":"favors LV"},{"feature":"home_power","label":"home power","value":-2.229,"impact":-0.386,"direction":"favors MIA"}],"total":[{"feature":"pace_projection","label":"projected pace","value":32.489,"impact":-1.406,"direction":"lower scoring"},{"feature":"away_def_power","label":"away defensive power","value":-1.166,"impact":1.394,"direction":"higher scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":3.083,"impact":-1.384,"direction":"lower scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-4.683,"impact":-1.097,"direction":"lower scoring"},{"feature":"wind_mph","label":"wind speed","value":0.0,"impact":1.005,"direction":"higher scoring"},{"feature":"d_def_rz_td_rate_l3","label":"gap in defensive red-zone TD rate (last 3)","value":-0.456,"impact":0.766,"direction":"higher scoring"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":0.039,"impact":0.625,"direction":"higher scoring"},{"feature":"mm_home_expl_vs_away_expl_def","label":"home expl vs away expl def","value":-0.038,"impact":0.509,"direction":"higher scoring"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":-0.994,"impact":0.487,"direction":"higher scoring"},{"feature":"home_off_power","label":"home offensive power","value":-2.098,"impact":-0.43,"direction":"lower scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":-0.035,"impact":-0.388,"direction":"lower scoring"},{"feature":"plays_projection","label":"projected play volume","value":57.124,"impact":-0.349,"direction":"lower scoring"}]},"uncertainty":{"win_prob_member_sd":0.0519,"margin_member_sd":1.35,"member_win_probs":{"xgb":0.444,"lgb":0.5656,"linear":0.5364}},"flags":["Model line differs from market by 6.2 points (away side) - verify no late news is missing."]},{"game":{"game_id":"2026_01_NE_SEA","season":2026,"week":1,"home_team":"SEA","away_team":"NE","kickoff":"2026-09-09","stadium":"Lumen Field"},"prediction":{"home_win_prob":0.6,"away_win_prob":0.4,"predicted_margin_home":3.36,"model_spread_home":-3.36,"predicted_total":42.77,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-3.5,"market_home_favored_by":3.5,"market_total":44.5,"market_home_win_prob":0.6225,"spread_edge_points":-0.14,"total_edge_points":-1.73,"win_prob_edge":-0.0225,"recommended_side":"NE +3.5","recommended_total":"Under 44.5"},"environment":{"roof":"outdoors","surface":"fieldturf","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"primetime","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":2485.0,"divisional":false,"projected_pace_sec_per_play":31.65,"projected_scoring_env":4.35},"team_form":{"SEA":{"power_rating":2.87,"offense_rating":0.76,"defense_rating":2.12,"qb_impact":0.133,"qb_epa_per_dropback_l5":0.133,"off_epa_ewma":0.066,"def_epa_ewma":-0.177,"explosive_rate":0.095,"rz_td_rate":0.471,"win_rate_l5":1.0,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"NE":{"power_rating":2.13,"offense_rating":0.42,"defense_rating":1.71,"qb_impact":-0.124,"qb_epa_per_dropback_l5":-0.124,"off_epa_ewma":0.011,"def_epa_ewma":-0.144,"explosive_rate":0.1,"rz_td_rate":0.623,"win_rate_l5":0.8,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home pass off vs away pass def","edge":0.308},{"matchup":"away pass off vs home pass def","edge":0.253},{"matchup":"away rush off vs home rush def","edge":0.115},{"matchup":"home rush off vs away rush def","edge":0.085},{"matchup":"away rz vs home rz def","edge":0.07},{"matchup":"home rz vs away rz def","edge":0.046},{"matchup":"home expl vs away expl def","edge":0.037},{"matchup":"home pass-rush edge","edge":-0.036}],"drivers":{"win":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":6.662,"impact":0.197,"direction":"favors SEA"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.136,"impact":-0.141,"direction":"favors NE"},{"feature":"d_travel_miles","label":"travel distance gap","value":-2484.571,"impact":-0.091,"direction":"favors NE"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":5.424,"impact":0.083,"direction":"favors SEA"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.355,"impact":-0.08,"direction":"favors NE"},{"feature":"home_def_power","label":"home defensive power","value":2.117,"impact":0.078,"direction":"favors SEA"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":-0.038,"impact":0.067,"direction":"favors SEA"},{"feature":"d_momentum","label":"momentum gap","value":18.667,"impact":-0.066,"direction":"favors NE"},{"feature":"d_adj_off_points_per_drive_ewma","label":"gap in opponent-adjusted offensive points per drive (recency-weighted)","value":0.408,"impact":0.06,"direction":"favors SEA"},{"feature":"d_off_sack_rate_std","label":"gap in offensive sack rate (season to date)","value":0.0,"impact":-0.054,"direction":"favors NE"},{"feature":"pace_projection","label":"projected pace","value":31.645,"impact":-0.053,"direction":"favors NE"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":0.146,"impact":0.052,"direction":"favors SEA"}],"margin":[{"feature":"away_power","label":"away power","value":2.135,"impact":1.385,"direction":"favors SEA"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":6.662,"impact":1.348,"direction":"favors SEA"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.136,"impact":-1.332,"direction":"favors NE"},{"feature":"d_travel_miles","label":"travel distance gap","value":-2484.571,"impact":-0.506,"direction":"favors NE"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.355,"impact":-0.424,"direction":"favors NE"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":5.424,"impact":0.415,"direction":"favors SEA"},{"feature":"d_points_for_l3","label":"gap in points scored (last 3)","value":16.667,"impact":-0.359,"direction":"favors NE"},{"feature":"away_def_power","label":"away defensive power","value":1.71,"impact":0.334,"direction":"favors SEA"},{"feature":"d_def_early_down_epa_std","label":"gap in defensive early-down EPA/play (season to date)","value":0.0,"impact":-0.309,"direction":"favors NE"},{"feature":"d_off_sack_rate_l3","label":"gap in offensive sack rate (last 3)","value":-0.077,"impact":0.285,"direction":"favors SEA"},{"feature":"expected_explosive_rate","label":"projected explosive-play rate","value":0.098,"impact":-0.261,"direction":"favors NE"},{"feature":"d_adj_def_rush_epa_l3","label":"gap in opponent-adjusted defensive rushing EPA/play (last 3)","value":-0.021,"impact":0.257,"direction":"favors SEA"}],"total":[{"feature":"pace_projection","label":"projected pace","value":31.645,"impact":-1.738,"direction":"lower scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.355,"impact":1.441,"direction":"higher scoring"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":-6.44,"impact":-1.287,"direction":"lower scoring"},{"feature":"home_def_power","label":"home defensive power","value":2.117,"impact":-1.178,"direction":"lower scoring"},{"feature":"away_def_power","label":"away defensive power","value":1.71,"impact":-1.048,"direction":"lower scoring"},{"feature":"wind_mph","label":"wind speed","value":null,"impact":-0.858,"direction":"lower scoring"},{"feature":"home_off_power","label":"home offensive power","value":0.758,"impact":0.645,"direction":"higher scoring"},{"feature":"mm_home_pressure_edge","label":"home pass-rush edge","value":-0.036,"impact":-0.554,"direction":"lower scoring"},{"feature":"d_def_yards_per_play_l3","label":"gap in defensive yards per play (last 3)","value":1.891,"impact":0.552,"direction":"higher scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":0.133,"impact":0.455,"direction":"higher scoring"},{"feature":"d_off_score_rate_l3","label":"gap in offensive scoring-drive rate (last 3)","value":0.385,"impact":-0.392,"direction":"lower scoring"},{"feature":"plays_projection","label":"projected play volume","value":63.538,"impact":-0.371,"direction":"lower scoring"}]},"uncertainty":{"win_prob_member_sd":0.0785,"margin_member_sd":0.61,"member_win_probs":{"xgb":0.5609,"lgb":0.6131,"linear":0.7472}},"flags":["Ensemble members disagree on win probability (sd=0.078); treat the probability as soft.","SEA has an unsustainable recent turnover margin (+1.4/game)."]},{"game":{"game_id":"2026_01_NO_DET","season":2026,"week":1,"home_team":"DET","away_team":"NO","kickoff":"2026-09-13","stadium":"Ford Field"},"prediction":{"home_win_prob":0.5897,"away_win_prob":0.4103,"predicted_margin_home":3.6,"model_spread_home":-3.6,"predicted_total":48.72,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-7.0,"market_home_favored_by":7.0,"market_total":49.5,"market_home_win_prob":0.7258,"spread_edge_points":-3.4,"total_edge_points":-0.78,"win_prob_edge":-0.136,"recommended_side":"NO +7.0","recommended_total":"Under 49.5"},"environment":{"roof":"dome","surface":"fieldturf","indoor":true,"wind_mph":0.0,"temp_f":68.0,"weather_impact":0.0,"kickoff_bucket":"early","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":941.0,"divisional":false,"projected_pace_sec_per_play":30.33,"projected_scoring_env":4.16},"team_form":{"DET":{"power_rating":0.31,"offense_rating":0.47,"defense_rating":-0.16,"qb_impact":0.178,"qb_epa_per_dropback_l5":0.178,"off_epa_ewma":0.032,"def_epa_ewma":0.027,"explosive_rate":0.099,"rz_td_rate":0.568,"win_rate_l5":0.4,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"NO":{"power_rating":0.27,"offense_rating":-0.82,"defense_rating":1.09,"qb_impact":0.187,"qb_epa_per_dropback_l5":0.187,"off_epa_ewma":-0.041,"def_epa_ewma":-0.118,"explosive_rate":0.065,"rz_td_rate":0.527,"win_rate_l5":0.8,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home pass off vs away pass def","edge":0.208},{"matchup":"away rush off vs home rush def","edge":-0.202},{"matchup":"home rz vs away rz def","edge":0.121},{"matchup":"away rz vs home rz def","edge":-0.115},{"matchup":"home rush off vs away rush def","edge":0.043},{"matchup":"away expl vs home expl def","edge":-0.027},{"matchup":"home expl vs away expl def","edge":0.026},{"matchup":"away pass-rush edge","edge":0.019}],"drivers":{"win":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.09,"impact":0.153,"direction":"favors DET"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":0.016,"impact":-0.125,"direction":"favors NO"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":0.209,"impact":0.113,"direction":"favors DET"},{"feature":"d_coach_margin","label":"gap in coach margin","value":7.136,"impact":0.111,"direction":"favors DET"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":0.176,"impact":-0.098,"direction":"favors NO"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":5.276,"impact":0.085,"direction":"favors DET"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.16,"impact":-0.084,"direction":"favors NO"},{"feature":"mm_home_rz_vs_away_rz_def","label":"home rz vs away rz def","value":0.121,"impact":0.071,"direction":"favors DET"},{"feature":"d_penalty_yards_l3","label":"gap in penalty yards (last 3)","value":-18.0,"impact":-0.07,"direction":"favors NO"},{"feature":"d_off_pass_rate_oe_l3","label":"gap in offensive pass rate over expected (last 3)","value":-6.224,"impact":-0.049,"direction":"favors NO"},{"feature":"d_adj_off_success_rate_ewma","label":"gap in opponent-adjusted offensive success rate (recency-weighted)","value":0.038,"impact":0.047,"direction":"favors DET"},{"feature":"d_points_against_ewma","label":"gap in points allowed (recency-weighted)","value":5.1,"impact":-0.042,"direction":"favors NO"}],"margin":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.09,"impact":1.227,"direction":"favors DET"},{"feature":"expected_pressure_rate","label":"projected pressure rate","value":0.085,"impact":1.165,"direction":"favors DET"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":5.276,"impact":0.454,"direction":"favors DET"},{"feature":"d_ats_rate_l5","label":"gap in ats rate (last 5)","value":-0.6,"impact":0.436,"direction":"favors DET"},{"feature":"d_adj_off_success_rate_ewma","label":"gap in opponent-adjusted offensive success rate (recency-weighted)","value":0.038,"impact":0.386,"direction":"favors DET"},{"feature":"d_def_early_down_epa_std","label":"gap in defensive early-down EPA/play (season to date)","value":0.0,"impact":-0.369,"direction":"favors NO"},{"feature":"d_coach_margin","label":"gap in coach margin","value":7.136,"impact":0.367,"direction":"favors DET"},{"feature":"d_margin_std","label":"gap in scoring margin (season to date)","value":0.0,"impact":-0.35,"direction":"favors NO"},{"feature":"d_points_against_ewma","label":"gap in points allowed (recency-weighted)","value":5.1,"impact":-0.337,"direction":"favors NO"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":4.609,"impact":-0.328,"direction":"favors NO"},{"feature":"d_one_score_win_rate","label":"one-score-game win rate gap (regression risk)","value":-0.062,"impact":0.312,"direction":"favors DET"},{"feature":"d_off_yards_per_play_l3","label":"gap in offensive yards per play (last 3)","value":-1.261,"impact":-0.277,"direction":"favors NO"}],"total":[{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.16,"impact":1.754,"direction":"higher scoring"},{"feature":"wind_mph","label":"wind speed","value":0.0,"impact":0.946,"direction":"higher scoring"},{"feature":"away_def_power","label":"away defensive power","value":1.094,"impact":-0.741,"direction":"lower scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":0.178,"impact":0.735,"direction":"higher scoring"},{"feature":"away_qb_impact","label":"away QB impact","value":0.187,"impact":0.661,"direction":"higher scoring"},{"feature":"d_adj_def_rush_epa_ewma","label":"gap in opponent-adjusted defensive rushing EPA/play (recency-weighted)","value":0.182,"impact":-0.569,"direction":"lower scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-2.145,"impact":-0.356,"direction":"lower scoring"},{"feature":"d_off_score_rate_ewma","label":"gap in offensive scoring-drive rate (recency-weighted)","value":0.096,"impact":0.339,"direction":"higher scoring"},{"feature":"d_def_rz_td_rate_ewma","label":"gap in defensive red-zone TD rate (recency-weighted)","value":0.196,"impact":-0.309,"direction":"lower scoring"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":4.609,"impact":-0.303,"direction":"lower scoring"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":151.0,"impact":0.299,"direction":"higher scoring"},{"feature":"away_off_power","label":"away offensive power","value":-0.822,"impact":-0.288,"direction":"lower scoring"}]},"uncertainty":{"win_prob_member_sd":0.0986,"margin_member_sd":1.52,"member_win_probs":{"xgb":0.5311,"lgb":0.6131,"linear":0.7688}},"flags":["Model line differs from market by 3.4 points (away side) - verify no late news is missing.","Ensemble members disagree on win probability (sd=0.099); treat the probability as soft."]},{"game":{"game_id":"2026_01_NYJ_TEN","season":2026,"week":1,"home_team":"TEN","away_team":"NYJ","kickoff":"2026-09-13","stadium":"Nissan Stadium"},"prediction":{"home_win_prob":0.5846,"away_win_prob":0.4154,"predicted_margin_home":2.78,"model_spread_home":-2.78,"predicted_total":42.86,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-3.0,"market_home_favored_by":3.0,"market_total":38.5,"market_home_win_prob":0.5721,"spread_edge_points":-0.22,"total_edge_points":4.36,"win_prob_edge":0.0126,"recommended_side":"NYJ +3.0","recommended_total":"Over 38.5"},"environment":{"roof":"outdoors","surface":"grass","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"early","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":757.0,"divisional":false,"projected_pace_sec_per_play":30.5,"projected_scoring_env":2.84},"team_form":{"TEN":{"power_rating":-2.25,"offense_rating":-1.05,"defense_rating":-1.2,"qb_impact":-0.142,"qb_epa_per_dropback_l5":-0.142,"off_epa_ewma":-0.136,"def_epa_ewma":0.104,"explosive_rate":0.076,"rz_td_rate":0.648,"win_rate_l5":0.4,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"NYJ":{"power_rating":-4.28,"offense_rating":-1.88,"defense_rating":-2.4,"qb_impact":-0.191,"qb_epa_per_dropback_l5":-0.383,"off_epa_ewma":-0.188,"def_epa_ewma":0.204,"explosive_rate":0.051,"rz_td_rate":0.406,"win_rate_l5":0.0,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home pass off vs away pass def","edge":-0.575},{"matchup":"away pass off vs home pass def","edge":-0.431},{"matchup":"away rz vs home rz def","edge":-0.306},{"matchup":"away rush off vs home rush def","edge":-0.072},{"matchup":"away expl vs home expl def","edge":-0.045},{"matchup":"home expl vs away expl def","edge":-0.039},{"matchup":"away pass-rush edge","edge":-0.03},{"matchup":"home rz vs away rz def","edge":-0.023}],"drivers":{"win":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":6.913,"impact":0.253,"direction":"favors TEN"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.19,"impact":0.157,"direction":"favors TEN"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":3.801,"impact":0.104,"direction":"favors TEN"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":0.053,"impact":0.065,"direction":"favors TEN"},{"feature":"d_off_sack_rate_l5","label":"gap in offensive sack rate (last 5)","value":-0.052,"impact":0.062,"direction":"favors TEN"},{"feature":"d_coach_margin","label":"gap in coach margin","value":6.544,"impact":0.06,"direction":"favors TEN"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-7.32,"impact":0.055,"direction":"favors TEN"},{"feature":"d_momentum","label":"momentum gap","value":19.0,"impact":-0.054,"direction":"favors NYJ"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":0.162,"impact":0.052,"direction":"favors TEN"},{"feature":"d_off_sack_rate_std","label":"gap in offensive sack rate (season to date)","value":0.0,"impact":-0.046,"direction":"favors NYJ"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":2.839,"impact":0.045,"direction":"favors TEN"},{"feature":"d_off_turnovers_per_play_l5","label":"gap in offensive turnovers per play (last 5)","value":-0.019,"impact":0.045,"direction":"favors TEN"}],"margin":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":6.913,"impact":1.185,"direction":"favors TEN"},{"feature":"mm_away_pass_off_vs_home_pass_def","label":"away pass off vs home pass def","value":-0.431,"impact":-0.984,"direction":"favors NYJ"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.19,"impact":0.887,"direction":"favors TEN"},{"feature":"d_off_turnovers_per_play_l5","label":"gap in offensive turnovers per play (last 5)","value":-0.019,"impact":0.787,"direction":"favors TEN"},{"feature":"away_power","label":"away power","value":-4.28,"impact":-0.735,"direction":"favors NYJ"},{"feature":"home_qb_impact","label":"home QB impact","value":-0.142,"impact":-0.628,"direction":"favors NYJ"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":3.801,"impact":0.554,"direction":"favors TEN"},{"feature":"d_off_rz_td_rate_l5","label":"gap in offensive red-zone TD rate (last 5)","value":0.483,"impact":0.498,"direction":"favors TEN"},{"feature":"home_power","label":"home power","value":-2.253,"impact":-0.463,"direction":"favors NYJ"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":6.908,"impact":0.444,"direction":"favors TEN"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":6.554,"impact":-0.395,"direction":"favors NYJ"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":0.417,"impact":-0.375,"direction":"favors NYJ"}],"total":[{"feature":"expected_scoring_env","label":"projected scoring environment","value":2.839,"impact":-1.521,"direction":"lower scoring"},{"feature":"expected_explosive_rate","label":"projected explosive-play rate","value":0.063,"impact":-1.385,"direction":"lower scoring"},{"feature":"away_def_power","label":"away defensive power","value":-2.396,"impact":0.997,"direction":"higher scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-7.32,"impact":-0.973,"direction":"lower scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":-0.142,"impact":-0.624,"direction":"lower scoring"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":6.554,"impact":-0.597,"direction":"lower scoring"},{"feature":"home_off_power","label":"home offensive power","value":-1.053,"impact":-0.515,"direction":"lower scoring"},{"feature":"d_off_yards_per_play_l5","label":"gap in offensive yards per play (last 5)","value":1.116,"impact":-0.444,"direction":"lower scoring"},{"feature":"d_def_sack_rate_ewma","label":"gap in defensive sack rate (recency-weighted)","value":0.037,"impact":0.433,"direction":"higher scoring"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":6.908,"impact":0.41,"direction":"higher scoring"},{"feature":"home_def_power","label":"home defensive power","value":-1.2,"impact":0.408,"direction":"higher scoring"},{"feature":"mm_home_expl_vs_away_expl_def","label":"home expl vs away expl def","value":-0.039,"impact":0.389,"direction":"higher scoring"}]},"uncertainty":{"win_prob_member_sd":0.0881,"margin_member_sd":0.51,"member_win_probs":{"xgb":0.7134,"lgb":0.5415,"linear":0.5146}},"flags":["Ensemble members disagree on win probability (sd=0.088); treat the probability as soft.","NYJ has an unsustainable recent turnover margin (-1.4/game)."]},{"game":{"game_id":"2026_01_SF_LA","season":2026,"week":1,"home_team":"LA","away_team":"SF","kickoff":"2026-09-10","stadium":"Melbourne Cricket Ground"},"prediction":{"home_win_prob":0.525,"away_win_prob":0.475,"predicted_margin_home":2.34,"model_spread_home":-2.34,"predicted_total":54.42,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-3.5,"market_home_favored_by":3.5,"market_total":48.5,"market_home_win_prob":0.6309,"spread_edge_points":-1.16,"total_edge_points":5.92,"win_prob_edge":-0.1059,"recommended_side":"SF +3.5","recommended_total":"Over 48.5"},"environment":{"roof":"dome","surface":"matrixturf","indoor":true,"wind_mph":0.0,"temp_f":68.0,"weather_impact":0.0,"kickoff_bucket":"primetime","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":314.0,"divisional":true,"projected_pace_sec_per_play":30.14,"projected_scoring_env":4.91},"team_form":{"LA":{"power_rating":1.63,"offense_rating":1.65,"defense_rating":-0.02,"qb_impact":0.188,"qb_epa_per_dropback_l5":0.188,"off_epa_ewma":0.151,"def_epa_ewma":0.016,"explosive_rate":0.111,"rz_td_rate":0.643,"win_rate_l5":0.6,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"SF":{"power_rating":-0.7,"offense_rating":0.44,"defense_rating":-1.14,"qb_impact":0.052,"qb_epa_per_dropback_l5":0.052,"off_epa_ewma":0.002,"def_epa_ewma":0.092,"explosive_rate":0.072,"rz_td_rate":0.629,"win_rate_l5":0.6,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home rz vs away rz def","edge":0.107},{"matchup":"home pass off vs away pass def","edge":0.066},{"matchup":"away pass off vs home pass def","edge":-0.046},{"matchup":"away rz vs home rz def","edge":0.041},{"matchup":"home expl vs away expl def","edge":0.033},{"matchup":"away rush off vs home rush def","edge":0.028},{"matchup":"home rush off vs away rush def","edge":0.016},{"matchup":"home pass-rush edge","edge":0.015}],"drivers":{"win":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":7.303,"impact":0.201,"direction":"favors LA"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.13,"impact":-0.165,"direction":"favors SF"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":6.713,"impact":0.094,"direction":"favors LA"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.911,"impact":-0.072,"direction":"favors SF"},{"feature":"d_off_rush_sr_ewma","label":"gap in offensive rush success rate (recency-weighted)","value":0.094,"impact":0.071,"direction":"favors LA"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":-0.003,"impact":0.058,"direction":"favors LA"},{"feature":"d_momentum","label":"momentum gap","value":14.333,"impact":-0.058,"direction":"favors SF"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":-0.026,"impact":-0.053,"direction":"favors SF"},{"feature":"home_off_power","label":"home offensive power","value":1.646,"impact":0.053,"direction":"favors LA"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":0.06,"impact":0.052,"direction":"favors LA"},{"feature":"d_adj_off_points_per_drive_ewma","label":"gap in opponent-adjusted offensive points per drive (recency-weighted)","value":0.055,"impact":-0.05,"direction":"favors SF"},{"feature":"away_off_power","label":"away offensive power","value":0.439,"impact":-0.05,"direction":"favors SF"}],"margin":[{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":-0.13,"impact":-1.5,"direction":"favors SF"},{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":7.303,"impact":1.002,"direction":"favors LA"},{"feature":"d_off_rush_sr_l3","label":"gap in offensive rush success rate (last 3)","value":0.151,"impact":0.542,"direction":"favors LA"},{"feature":"d_off_rush_sr_ewma","label":"gap in offensive rush success rate (recency-weighted)","value":0.094,"impact":0.489,"direction":"favors LA"},{"feature":"d_off_third_down_rate_ewma","label":"gap in offensive 3rd-down conversion rate (recency-weighted)","value":-0.188,"impact":-0.469,"direction":"favors SF"},{"feature":"d_points_for_l3","label":"gap in points scored (last 3)","value":16.333,"impact":-0.367,"direction":"favors SF"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.911,"impact":-0.352,"direction":"favors SF"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":0.378,"impact":-0.35,"direction":"favors SF"},{"feature":"d_off_third_down_rate_l5","label":"gap in offensive 3rd-down conversion rate (last 5)","value":-0.214,"impact":-0.343,"direction":"favors SF"},{"feature":"d_def_qb_hit_rate_l5","label":"gap in defensive QB hit rate (last 5)","value":0.128,"impact":0.337,"direction":"favors LA"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":6.713,"impact":0.326,"direction":"favors LA"},{"feature":"d_def_epa_per_play_l5","label":"gap in defensive EPA per play (last 5)","value":-0.077,"impact":-0.314,"direction":"favors SF"}],"total":[{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.911,"impact":3.019,"direction":"higher scoring"},{"feature":"away_def_power","label":"away defensive power","value":-1.138,"impact":1.814,"direction":"higher scoring"},{"feature":"wind_mph","label":"wind speed","value":0.0,"impact":1.188,"direction":"higher scoring"},{"feature":"home_off_power","label":"home offensive power","value":1.646,"impact":1.156,"direction":"higher scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":0.188,"impact":0.693,"direction":"higher scoring"},{"feature":"d_off_score_rate_l3","label":"gap in offensive scoring-drive rate (last 3)","value":0.189,"impact":-0.512,"direction":"lower scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":1.384,"impact":0.495,"direction":"higher scoring"},{"feature":"d_off_rush_sr_l3","label":"gap in offensive rush success rate (last 3)","value":0.151,"impact":-0.478,"direction":"lower scoring"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":-4.32,"impact":0.428,"direction":"higher scoring"},{"feature":"d_off_sec_per_play_l5","label":"gap in offensive seconds per play (pace) (last 5)","value":-4.574,"impact":0.417,"direction":"higher scoring"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":197.0,"impact":0.367,"direction":"higher scoring"},{"feature":"d_off_cpoe_ewma","label":"gap in offensive completion % over expected (recency-weighted)","value":-5.261,"impact":0.365,"direction":"higher scoring"}]},"uncertainty":{"win_prob_member_sd":0.0417,"margin_member_sd":0.58,"member_win_probs":{"xgb":0.5636,"lgb":0.4917,"linear":0.4647}},"flags":["SF has an unsustainable recent turnover margin (-1.4/game)."]},{"game":{"game_id":"2026_01_TB_CIN","season":2026,"week":1,"home_team":"CIN","away_team":"TB","kickoff":"2026-09-13","stadium":"Paycor Stadium"},"prediction":{"home_win_prob":0.5714,"away_win_prob":0.4286,"predicted_margin_home":2.78,"model_spread_home":-2.78,"predicted_total":47.2,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-3.5,"market_home_favored_by":3.5,"market_total":51.5,"market_home_win_prob":0.6447,"spread_edge_points":-0.72,"total_edge_points":-4.3,"win_prob_edge":-0.0733,"recommended_side":"TB +3.5","recommended_total":"Under 51.5"},"environment":{"roof":"outdoors","surface":"fieldturf","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"early","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":777.0,"divisional":false,"projected_pace_sec_per_play":31.72,"projected_scoring_env":4.42},"team_form":{"CIN":{"power_rating":0.15,"offense_rating":0.8,"defense_rating":-0.65,"qb_impact":0.194,"qb_epa_per_dropback_l5":0.194,"off_epa_ewma":0.056,"def_epa_ewma":0.05,"explosive_rate":0.078,"rz_td_rate":0.673,"win_rate_l5":0.4,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"TB":{"power_rating":-0.68,"offense_rating":-0.1,"defense_rating":-0.58,"qb_impact":0.041,"qb_epa_per_dropback_l5":0.041,"off_epa_ewma":0.008,"def_epa_ewma":0.038,"explosive_rate":0.08,"rz_td_rate":0.564,"win_rate_l5":0.2,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home rush off vs away rush def","edge":0.177},{"matchup":"away rz vs home rz def","edge":0.103},{"matchup":"away rush off vs home rush def","edge":-0.08},{"matchup":"home pass off vs away pass def","edge":-0.06},{"matchup":"home pass-rush edge","edge":0.028},{"matchup":"away expl vs home expl def","edge":-0.024},{"matchup":"home rz vs away rz def","edge":-0.022},{"matchup":"away pass off vs home pass def","edge":0.018}],"drivers":{"win":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":3.24,"impact":0.193,"direction":"favors CIN"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":0.013,"impact":-0.171,"direction":"favors TB"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":5.593,"impact":0.115,"direction":"favors CIN"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.049,"impact":0.108,"direction":"favors CIN"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.417,"impact":-0.07,"direction":"favors TB"},{"feature":"d_penalty_yards_l3","label":"gap in penalty yards (last 3)","value":-19.333,"impact":-0.064,"direction":"favors TB"},{"feature":"d_momentum","label":"momentum gap","value":16.333,"impact":-0.055,"direction":"favors TB"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":0.054,"impact":0.051,"direction":"favors CIN"},{"feature":"home_off_power","label":"home offensive power","value":0.801,"impact":0.049,"direction":"favors CIN"},{"feature":"d_off_pass_rate_oe_l5","label":"gap in offensive pass rate over expected (last 5)","value":5.955,"impact":-0.048,"direction":"favors TB"},{"feature":"d_adj_off_success_rate_ewma","label":"gap in opponent-adjusted offensive success rate (recency-weighted)","value":0.071,"impact":0.047,"direction":"favors CIN"},{"feature":"d_off_turnovers_per_play_l5","label":"gap in offensive turnovers per play (last 5)","value":-0.003,"impact":-0.047,"direction":"favors TB"}],"margin":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":3.24,"impact":1.067,"direction":"favors CIN"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.049,"impact":1.058,"direction":"favors CIN"},{"feature":"d_off_rush_sr_l3","label":"gap in offensive rush success rate (last 3)","value":0.173,"impact":0.46,"direction":"favors CIN"},{"feature":"d_adj_off_success_rate_ewma","label":"gap in opponent-adjusted offensive success rate (recency-weighted)","value":0.071,"impact":0.421,"direction":"favors CIN"},{"feature":"d_off_rz_td_rate_l3","label":"gap in offensive red-zone TD rate (last 3)","value":0.361,"impact":-0.415,"direction":"favors TB"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":-45.0,"impact":-0.386,"direction":"favors TB"},{"feature":"d_margin_std","label":"gap in scoring margin (season to date)","value":0.0,"impact":-0.372,"direction":"favors TB"},{"feature":"d_adj_def_explosive_rate_ewma","label":"gap in opponent-adjusted defensive explosive play rate (recency-weighted)","value":0.013,"impact":-0.339,"direction":"favors TB"},{"feature":"d_coach_margin","label":"gap in coach margin","value":0.531,"impact":0.338,"direction":"favors CIN"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":5.593,"impact":0.309,"direction":"favors CIN"},{"feature":"d_off_turnovers_per_play_l5","label":"gap in offensive turnovers per play (last 5)","value":-0.003,"impact":-0.298,"direction":"favors TB"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.417,"impact":-0.27,"direction":"favors TB"}],"total":[{"feature":"pace_projection","label":"projected pace","value":31.723,"impact":-1.651,"direction":"lower scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.417,"impact":1.037,"direction":"higher scoring"},{"feature":"away_def_power","label":"away defensive power","value":-0.576,"impact":0.69,"direction":"higher scoring"},{"feature":"home_off_power","label":"home offensive power","value":0.801,"impact":0.638,"direction":"higher scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":0.194,"impact":0.596,"direction":"higher scoring"},{"feature":"wind_mph","label":"wind speed","value":null,"impact":-0.583,"direction":"lower scoring"},{"feature":"d_def_sack_rate_ewma","label":"gap in defensive sack rate (recency-weighted)","value":0.041,"impact":0.528,"direction":"higher scoring"},{"feature":"d_off_rush_sr_l3","label":"gap in offensive rush success rate (last 3)","value":0.173,"impact":-0.426,"direction":"lower scoring"},{"feature":"d_adj_def_rush_epa_ewma","label":"gap in opponent-adjusted defensive rushing EPA/play (recency-weighted)","value":0.118,"impact":-0.401,"direction":"lower scoring"},{"feature":"home_def_power","label":"home defensive power","value":-0.647,"impact":0.395,"direction":"higher scoring"},{"feature":"d_off_sec_per_play_l3","label":"gap in offensive seconds per play (pace) (last 3)","value":-2.235,"impact":0.387,"direction":"higher scoring"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":4.562,"impact":0.369,"direction":"higher scoring"}]},"uncertainty":{"win_prob_member_sd":0.0605,"margin_member_sd":0.34,"member_win_probs":{"xgb":0.4709,"lgb":0.5074,"linear":0.6134}},"flags":["Ensemble members disagree on win probability (sd=0.060); treat the probability as soft."]},{"game":{"game_id":"2026_01_WAS_PHI","season":2026,"week":1,"home_team":"PHI","away_team":"WAS","kickoff":"2026-09-13","stadium":"Lincoln Financial Field"},"prediction":{"home_win_prob":0.6429,"away_win_prob":0.3571,"predicted_margin_home":5.52,"model_spread_home":-5.52,"predicted_total":45.39,"margin_uncertainty_sd":10.79,"total_uncertainty_sd":10.64},"market":{"market_spread_home":-4.5,"market_home_favored_by":4.5,"market_total":47.5,"market_home_win_prob":0.6575,"spread_edge_points":1.02,"total_edge_points":-2.11,"win_prob_edge":-0.0146,"recommended_side":"PHI -4.5","recommended_total":"Under 47.5"},"environment":{"roof":"outdoors","surface":"grass","indoor":false,"wind_mph":null,"temp_f":null,"weather_impact":0.0,"kickoff_bucket":"late_afternoon","home_rest_days":7.0,"away_rest_days":7.0,"away_travel_miles":114.0,"divisional":true,"projected_pace_sec_per_play":30.96,"projected_scoring_env":4.05},"team_form":{"PHI":{"power_rating":0.43,"offense_rating":-0.28,"defense_rating":0.71,"qb_impact":0.073,"qb_epa_per_dropback_l5":0.073,"off_epa_ewma":0.016,"def_epa_ewma":-0.049,"explosive_rate":0.076,"rz_td_rate":0.601,"win_rate_l5":0.6,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}},"WAS":{"power_rating":-1.4,"offense_rating":0.36,"defense_rating":-1.76,"qb_impact":0.191,"qb_epa_per_dropback_l5":0.191,"off_epa_ewma":0.036,"def_epa_ewma":0.159,"explosive_rate":0.088,"rz_td_rate":0.624,"win_rate_l5":0.4,"injuries":{"qb":null,"ol":null,"dl":null,"lb":null,"db":null,"skill":null,"total":null}}},"matchup_edges":[{"matchup":"home rz vs away rz def","edge":-0.16},{"matchup":"home pass off vs away pass def","edge":-0.141},{"matchup":"away pass off vs home pass def","edge":0.115},{"matchup":"home rush off vs away rush def","edge":-0.104},{"matchup":"away rush off vs home rush def","edge":0.08},{"matchup":"away rz vs home rz def","edge":0.026},{"matchup":"away pass-rush edge","edge":0.024},{"matchup":"home expl vs away expl def","edge":-0.018}],"drivers":{"win":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":8.558,"impact":0.222,"direction":"favors PHI"},{"feature":"d_def_yards_per_play_ewma","label":"gap in defensive yards per play (recency-weighted)","value":-1.015,"impact":0.176,"direction":"favors PHI"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.141,"impact":0.164,"direction":"favors PHI"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.046,"impact":-0.077,"direction":"favors WAS"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":0.172,"impact":0.071,"direction":"favors PHI"},{"feature":"d_def_sack_rate_l3","label":"gap in defensive sack rate (last 3)","value":-0.037,"impact":-0.07,"direction":"favors WAS"},{"feature":"d_coach_margin","label":"gap in coach margin","value":4.153,"impact":0.063,"direction":"favors PHI"},{"feature":"pace_projection","label":"projected pace","value":30.96,"impact":-0.06,"direction":"favors WAS"},{"feature":"d_adj_off_success_rate_ewma","label":"gap in opponent-adjusted offensive success rate (recency-weighted)","value":-0.064,"impact":-0.053,"direction":"favors WAS"},{"feature":"d_off_points_per_drive_l3","label":"gap in offensive points per drive (last 3)","value":-0.519,"impact":0.051,"direction":"favors PHI"},{"feature":"d_points_for_ewma","label":"gap in points scored (recency-weighted)","value":0.441,"impact":-0.046,"direction":"favors WAS"},{"feature":"d_adj_off_pass_epa_std","label":"gap in opponent-adjusted offensive passing EPA/play (season to date)","value":-0.072,"impact":-0.041,"direction":"favors WAS"}],"margin":[{"feature":"d_margin_ewma","label":"gap in scoring margin (recency-weighted)","value":8.558,"impact":1.093,"direction":"favors PHI"},{"feature":"d_def_yards_per_play_ewma","label":"gap in defensive yards per play (recency-weighted)","value":-1.015,"impact":0.821,"direction":"favors PHI"},{"feature":"d_qb_epa_per_db_career","label":"gap in QB epa per db (career)","value":0.141,"impact":0.729,"direction":"favors PHI"},{"feature":"d_off_turnovers_per_play_l5","label":"gap in offensive turnovers per play (last 5)","value":-0.025,"impact":0.582,"direction":"favors PHI"},{"feature":"d_def_early_down_epa_l3","label":"gap in defensive early-down EPA/play (last 3)","value":-0.123,"impact":-0.486,"direction":"favors WAS"},{"feature":"d_def_early_down_epa_ewma","label":"gap in defensive early-down EPA/play (recency-weighted)","value":-0.188,"impact":0.454,"direction":"favors PHI"},{"feature":"d_off_pass_sr_l3","label":"gap in offensive pass success rate (last 3)","value":-0.154,"impact":0.39,"direction":"favors PHI"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":77.0,"impact":0.379,"direction":"favors PHI"},{"feature":"d_off_cpoe_l3","label":"gap in offensive completion % over expected (last 3)","value":-4.506,"impact":0.343,"direction":"favors PHI"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":6.221,"impact":0.304,"direction":"favors PHI"},{"feature":"d_coach_margin","label":"gap in coach margin","value":4.153,"impact":0.298,"direction":"favors PHI"},{"feature":"d_coach_win_rate","label":"gap in coach win rate","value":0.172,"impact":0.258,"direction":"favors PHI"}],"total":[{"feature":"pace_projection","label":"projected pace","value":30.96,"impact":-1.431,"direction":"lower scoring"},{"feature":"away_def_power","label":"away defensive power","value":-1.757,"impact":1.241,"direction":"higher scoring"},{"feature":"expected_scoring_env","label":"projected scoring environment","value":4.046,"impact":1.163,"direction":"higher scoring"},{"feature":"home_def_power","label":"home defensive power","value":0.714,"impact":-0.977,"direction":"lower scoring"},{"feature":"wind_mph","label":"wind speed","value":null,"impact":-0.661,"direction":"lower scoring"},{"feature":"expected_pass_rate","label":"projected pass-rate tendency","value":-4.516,"impact":-0.624,"direction":"lower scoring"},{"feature":"away_qb_impact","label":"away QB impact","value":0.191,"impact":0.521,"direction":"higher scoring"},{"feature":"d_qb_cpoe_career","label":"gap in QB completion % over expected (career)","value":6.221,"impact":0.448,"direction":"higher scoring"},{"feature":"home_off_power","label":"home offensive power","value":-0.283,"impact":-0.405,"direction":"lower scoring"},{"feature":"home_qb_impact","label":"home QB impact","value":0.073,"impact":0.4,"direction":"higher scoring"},{"feature":"d_qb_success_l5","label":"gap in QB success (last 5)","value":-0.035,"impact":0.382,"direction":"higher scoring"},{"feature":"d_qb_games_prior","label":"gap in QB games prior","value":77.0,"impact":0.316,"direction":"higher scoring"}]},"uncertainty":{"win_prob_member_sd":0.0368,"margin_member_sd":0.68,"member_win_probs":{"xgb":0.6747,"lgb":0.6419,"linear":0.731}},"flags":[]}]}},"backtest":{"no_market_model":{"tag":"model","games":3028,"win_accuracy":0.6264861294583883,"win_log_loss":0.6458231641911056,"win_brier":0.22600397459408833,"win_auc":0.67485979699459,"market_win_accuracy":0.6617112652791542,"market_win_log_loss":0.6125248200132012,"market_win_brier":0.21236476646375993,"favorite_accuracy":0.6605019815059445,"ats_games":2953,"ats_win_rate":0.4933965458855401,"ats_roi":-0.05806113967305975,"ats_mae_margin":10.247918889755889,"market_mae_margin":9.807133421400264,"ats_win_rate_edge1":0.49454862625381596,"ats_n_edge1":2293,"ats_roi_edge1":-0.05586171351544226,"ats_win_rate_edge2":0.502927400468384,"ats_n_edge2":1708,"ats_roi_edge2":-0.03986587183308494,"ats_win_rate_edge3":0.5025951557093425,"ats_n_edge3":1156,"ats_roi_edge3":-0.04050015728216419,"ats_win_rate_edge4":0.5261096605744126,"ats_n_edge4":766,"ats_roi_edge4":0.004391170187514839,"totals_games":3000,"totals_win_rate":0.5093333333333333,"totals_roi":-0.02763636363636363,"totals_mae":10.757386269553264,"market_totals_mae":10.441875825627477,"totals_win_rate_edge2":0.5227928447778419,"totals_n_edge2":1733,"totals_win_rate_edge3":0.5205479452054794,"totals_n_edge3":1241,"totals_win_rate_edge4":0.5101796407185629,"totals_n_edge4":835,"breakeven_at_-110":0.5238095238095238},"market_anchored_model":{"tag":"anchored","games":3028,"win_accuracy":0.6416776750330251,"win_log_loss":0.6338273529670846,"win_brier":0.22089503699106927,"win_auc":0.6901012737482118,"market_win_accuracy":0.6617112652791542,"market_win_log_loss":0.6125248200132012,"market_win_brier":0.21236476646375993,"favorite_accuracy":0.6605019815059445,"ats_games":2953,"ats_win_rate":0.49644429393836775,"ats_roi":-0.052242711572206994,"ats_mae_margin":10.034245211132616,"market_mae_margin":9.807133421400264,"ats_win_rate_edge1":0.5034046692607004,"ats_n_edge1":2056,"ats_roi_edge1":-0.03895472232048106,"ats_win_rate_edge2":0.5081168831168831,"ats_n_edge2":1232,"ats_roi_edge2":-0.02995867768595041,"ats_win_rate_edge3":0.4992679355783309,"ats_n_edge3":683,"ats_roi_edge3":-0.04685212298682283,"ats_win_rate_edge4":0.5047021943573667,"ats_n_edge4":319,"ats_roi_edge4":-0.03647762895411797,"totals_games":3000,"totals_win_rate":0.514,"totals_roi":-0.01872727272727272,"totals_mae":10.61961972776842,"market_totals_mae":10.441875825627477,"totals_win_rate_edge2":0.5102195306585919,"totals_n_edge2":1321,"totals_win_rate_edge3":0.5064377682403434,"totals_n_edge3":699,"totals_win_rate_edge4":0.48324022346368717,"totals_n_edge4":358,"breakeven_at_-110":0.5238095238095238},"by_season":[{"season":2015,"games":267,"win_accuracy":0.5880149812734082,"market_win_accuracy":0.6217228464419475,"win_log_loss":0.6619158263816842,"market_win_log_loss":0.6488180077276954,"ats_win_rate":0.490272373540856,"ats_roi":-0.06402546869472939,"totals_win_rate":0.5267175572519084,"ats_mae_margin":10.701591139238475,"market_mae_margin":10.117977528089888},{"season":2016,"games":267,"win_accuracy":0.5842696629213483,"market_win_accuracy":0.6404494382022472,"win_log_loss":0.669465092667548,"market_win_log_loss":0.6232852380234225,"ats_win_rate":0.4961832061068702,"ats_roi":-0.052741151977793166,"totals_win_rate":0.424812030075188,"ats_mae_margin":9.503643808326443,"market_mae_margin":9.043071161048688},{"season":2017,"games":267,"win_accuracy":0.651685393258427,"market_win_accuracy":0.7030075187969925,"win_log_loss":0.6289426752920263,"market_win_log_loss":0.593228950769932,"ats_win_rate":0.5135135135135135,"ats_roi":-0.019656019656019652,"totals_win_rate":0.4868913857677903,"ats_mae_margin":10.622379460866025,"market_mae_margin":10.08052434456929},{"season":2018,"games":267,"win_accuracy":0.6179775280898876,"market_win_accuracy":0.6666666666666666,"win_log_loss":0.6343681571874306,"market_win_log_loss":0.6130883408833545,"ats_win_rate":0.46511627906976744,"ats_roi":-0.1120507399577167,"totals_win_rate":0.5303030303030303,"ats_mae_margin":10.112937612845785,"market_mae_margin":9.874531835205993},{"season":2019,"games":267,"win_accuracy":0.6254681647940075,"market_win_accuracy":0.6441947565543071,"win_log_loss":0.6523089561081499,"market_win_log_loss":0.6160223848882944,"ats_win_rate":0.5058365758754864,"ats_roi":-0.03431199151043508,"totals_win_rate":0.518796992481203,"ats_mae_margin":10.67426821654406,"market_mae_margin":10.176029962546817},{"season":2020,"games":269,"win_accuracy":0.6617100371747212,"market_win_accuracy":0.6728624535315985,"win_log_loss":0.6217336820875039,"market_win_log_loss":0.5920051440982822,"ats_win_rate":0.5055762081784386,"ats_roi":-0.03480905711388982,"totals_win_rate":0.4696969696969697,"ats_mae_margin":10.237234806151456,"market_mae_margin":9.78996282527881},{"season":2021,"games":285,"win_accuracy":0.6280701754385964,"market_win_accuracy":0.6210526315789474,"win_log_loss":0.6542244610424618,"market_win_log_loss":0.6259942648471349,"ats_win_rate":0.505338078291815,"ats_roi":-0.035263668715626,"totals_win_rate":0.5709219858156028,"ats_mae_margin":10.984183323262732,"market_mae_margin":10.666666666666666},{"season":2022,"games":284,"win_accuracy":0.5950704225352113,"market_win_accuracy":0.6619718309859155,"win_log_loss":0.6560787376319611,"market_win_log_loss":0.6040099249274565,"ats_win_rate":0.4927007299270073,"ats_roi":-0.05938951559389516,"totals_win_rate":0.5302491103202847,"ats_mae_margin":9.386549101305325,"market_mae_margin":8.783450704225352},{"season":2023,"games":285,"win_accuracy":0.6175438596491228,"market_win_accuracy":0.6771929824561403,"win_log_loss":0.6720362882357845,"market_win_log_loss":0.6269703437511283,"ats_win_rate":0.45387453874538747,"ats_roi":-0.13351224421335126,"totals_win_rate":0.4875444839857651,"ats_mae_margin":10.512561975018615,"market_mae_margin":9.98421052631579},{"season":2024,"games":285,"win_accuracy":0.6736842105263158,"market_win_accuracy":0.7052631578947368,"win_log_loss":0.6315302685902155,"market_win_log_loss":0.5892140458430416,"ats_win_rate":0.501779359430605,"ats_roi":-0.0420575865415723,"totals_win_rate":0.5425531914893617,"ats_mae_margin":10.012035352042615,"market_mae_margin":9.703508771929824},{"season":2025,"games":285,"win_accuracy":0.6456140350877193,"market_win_accuracy":0.6631578947368421,"win_log_loss":0.6212638251582625,"market_win_log_loss":0.6058964207753398,"ats_win_rate":0.4964788732394366,"ats_roi":-0.05217669654289372,"totals_win_rate":0.5087719298245614,"ats_mae_margin":9.999799304262801,"market_mae_margin":9.670175438596491}],"calibration":[{"bucket":"(-0.001, 0.1]","n":"12","predicted":"0.023927597305130884","actual":"0.25","gap":"0.2260724026948691"},{"bucket":"(0.1, 0.2]","n":"52","predicted":"0.17082915946300087","actual":"0.28846153846153844","gap":"0.11763237899853757"},{"bucket":"(0.2, 0.3]","n":"165","predicted":"0.26716410810478863","actual":"0.30303030303030304","gap":"0.035866194925514405"},{"bucket":"(0.3, 0.4]","n":"434","predicted":"0.3545445707715119","actual":"0.4055299539170507","gap":"0.0509853831455388"},{"bucket":"(0.4, 0.5]","n":"357","predicted":"0.44416958297211506","actual":"0.4117647058823529","gap":"-0.03240487708976214"},{"bucket":"(0.5, 0.6]","n":"837","predicted":"0.5471891744227285","actual":"0.5185185185185185","gap":"-0.02867065590421003"},{"bucket":"(0.6, 0.7]","n":"514","predicted":"0.6340355457206132","actual":"0.6361867704280155","gap":"0.002151224707402366"},{"bucket":"(0.7, 0.8]","n":"480","predicted":"0.7480613995548908","actual":"0.7583333333333333","gap":"0.010271933778442488"},{"bucket":"(0.8, 0.9]","n":"118","predicted":"0.8374776143740588","actual":"0.7542372881355932","gap":"-0.08324032623846556"},{"bucket":"(0.9, 1.0]","n":"59","predicted":"0.965049599104951","actual":"0.9152542372881356","gap":"-0.04979536181681543"}],"available":true},"latest":{"season":2026,"week":1},"published":"2026-09-07 20:25"};
+(function () {
+  const S = window.__STATIC__;
+  const real = window.fetch.bind(window);
+  const reply = o => Promise.resolve(new Response(JSON.stringify(o),
+      {status: 200, headers: {'Content-Type': 'application/json'}}));
+  window.fetch = function (u, opts) {
+    const url = new URL(String(u), location.href);
+    if (!url.pathname.startsWith('/api/')) return real(u, opts);
+    const p = url.pathname, q = url.searchParams;
+    if (p === '/api/state')       return reply(S.state);
+    if (p === '/api/settings')    return reply(S.state.settings);
+    if (p === '/api/backtest')    return reply(S.backtest);
+    if (p === '/api/predictions') return reply(S.predictions[q.get('season') + '_' + q.get('week')] || {available: false});
+    if (p === '/api/job')         return reply({status: 'idle', lines: [], total_lines: 0});
+    if (p === '/api/run')         return reply({error: 'This is a read-only published copy.'});
+    return reply({error: 'not found'});
+  };
+})();
+</script>
+<script>
+/* =====================================================================
+   theme
+   ===================================================================== */
+const THEME_KEY = 'nflTheme';
+let theme = window.__initialTheme || 'system';
+// declared up here because applyTheme() runs before the backtest section loads
+// and re-inks the charts; a `let` further down would be in the temporal dead zone
+let lastBacktest = null;
+
+function applyTheme(t, persist) {
+  theme = t;
+  const root = document.documentElement;
+  if (t === 'system') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', t);
+  root.style.colorScheme = (t === 'system') ? 'light dark' : t;
+
+  for (const [id, val] of [['thLight','light'], ['thSystem','system'], ['thDark','dark']]) {
+    document.getElementById(id).setAttribute('aria-pressed', String(val === t));
+  }
+  if (persist) {
+    try { localStorage.setItem(THEME_KEY, t); } catch (e) { /* private mode */ }
+    // also store server-side so the choice survives a cache clear and follows
+    // the app to another browser on this machine
+    fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({theme: t})
+    }).catch(() => {});
+  }
+  if (lastBacktest) renderBacktestCharts(lastBacktest);   // charts re-ink per mode
+}
+document.getElementById('thLight').onclick  = () => applyTheme('light', true);
+document.getElementById('thSystem').onclick = () => applyTheme('system', true);
+document.getElementById('thDark').onclick   = () => applyTheme('dark', true);
+applyTheme(theme, false);
+
+// keep multiple open tabs in sync
+window.addEventListener('storage', e => {
+  if (e.key === THEME_KEY && e.newValue) applyTheme(e.newValue, false);
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (theme === 'system' && lastBacktest) renderBacktestCharts(lastBacktest);
+});
+
+const ink = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+/* =====================================================================
+   helpers
+   ===================================================================== */
+const $ = id => document.getElementById(id);
+const fmt = (v, d = 1) => (v === null || v === undefined || Number.isNaN(v)) ? '–' : Number(v).toFixed(d);
+const pct = (v, d = 1) => (v === null || v === undefined || Number.isNaN(v)) ? '–' : (Number(v) * 100).toFixed(d) + '%';
+const sgn = (v, d = 1) => (v === null || v === undefined || Number.isNaN(v)) ? '–' : (v > 0 ? '+' : '') + Number(v).toFixed(d);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const tip = $('tip');
+function showTip(html, ev) {
+  tip.innerHTML = html; tip.dataset.show = '1';
+  const pad = 14, r = tip.getBoundingClientRect();
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - pad;
+  if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - pad;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.dataset.show = '0'; };
+
+async function getJSON(u) { const r = await fetch(u); return r.json(); }
+async function postJSON(u, b) {
+  const r = await fetch(u, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                           body: JSON.stringify(b || {})});
+  return r.json();
+}
+
+/* =====================================================================
+   tabs
+   ===================================================================== */
+const views = {tabPred: 'viewPred', tabBack: 'viewBack', tabSetup: 'viewSetup'};
+for (const t of Object.keys(views)) {
+  $(t).onclick = () => {
+    for (const [k, v] of Object.entries(views)) {
+      $(k).setAttribute('aria-selected', String(k === t));
+      $(v).classList.toggle('hidden', k !== t);
+    }
+    if (t === 'tabBack') loadBacktest();
+  };
+}
+
+/* =====================================================================
+   state / setup
+   ===================================================================== */
+let STATE = null, PACKETS = [], ROWS = [];
+
+async function loadState() {
+  STATE = await getJSON('/api/state');
+  const s = STATE.setup;
+  const pill = $('setupPill');
+  if (!s.data_built)        { pill.className = 'pill bad';  pill.innerHTML = '<span class="ic">●</span> data not built'; }
+  else if (!s.model_trained){ pill.className = 'pill warn'; pill.innerHTML = '<span class="ic">●</span> models not trained'; }
+  else                      { pill.className = 'pill ok';   pill.innerHTML = '<span class="ic">●</span> ready'; }
+
+  $('setupSteps').innerHTML = [
+    ['Data built', s.data_built], ['Models trained', s.model_trained], ['Backtest run', s.backtest_run]
+  ].map(([k, v]) => `<span class="pill ${v ? 'ok' : ''}">${v ? '✓' : '○'} ${k}</span>`).join('');
+
+  $('deps').innerHTML = Object.entries(s.deps_ok)
+    .map(([k, v]) => `<span class="pill ${v ? 'ok' : 'bad'}">${v ? '✓' : '✕'} ${k}</span>`).join('');
+
+  const missing = Object.entries(s.deps_ok).filter(([, v]) => !v).map(([k]) => k);
+  $('setupNote').textContent = missing.length
+    ? 'Missing packages: ' + missing.join(', ') + '. Close this window and run the start file again — it installs them automatically.'
+    : 'Run these once, in order. Build takes a few minutes; the backtest retrains the model for every season and takes considerably longer.';
+
+  fillWeekPickers();
+}
+
+function fillWeekPickers() {
+  const sched = STATE.weeks.schedule, done = STATE.weeks.predicted;
+  const seasons = [...new Set(sched.map(x => x.season))].sort((a, b) => b - a);
+  const saved = STATE.settings;
+  const selS = $('selSeason'), selW = $('selWeek');
+  selS.innerHTML = seasons.map(s => `<option value="${s}">${s}</option>`).join('');
+  const wantS = saved.season && seasons.includes(saved.season) ? saved.season : seasons[0];
+  if (wantS) selS.value = wantS;
+
+  function weeks() {
+    const s = Number(selS.value);
+    const ws = sched.filter(x => x.season === s).map(x => x.week).sort((a, b) => a - b);
+    selW.innerHTML = ws.map(w => {
+      const has = done.some(d => d.season === s && d.week === w);
+      return `<option value="${w}">Week ${w}${has ? ' ✓' : ''}</option>`;
+    }).join('');
+    const wantW = saved.week && ws.includes(saved.week) ? saved.week : ws[0];
+    if (wantW) selW.value = wantW;
+  }
+  weeks();
+  selS.onchange = () => { weeks(); loadPredictions(); };
+  selW.onchange = () => loadPredictions();
+}
+
+/* =====================================================================
+   jobs
+   ===================================================================== */
+let pollTimer = null;
+async function runJob(action, extra, nameEl, timeEl, logEl, boxEl) {
+  boxEl.classList.remove('hidden');
+  logEl.textContent = '';
+  const started = await postJSON('/api/run', Object.assign({action}, extra || {}));
+  if (started.error) { logEl.textContent = 'Error: ' + started.error; return; }
+  const key = started.key;
+  nameEl.textContent = started.name || action;
+  let since = 0;
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    const j = await getJSON(`/api/job?key=${encodeURIComponent(key)}&since=${since}`);
+    if (j.lines && j.lines.length) {
+      logEl.textContent += j.lines.join('\n') + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+      since = j.total_lines;
+    }
+    timeEl.textContent = j.elapsed ? j.elapsed + 's' : '';
+    if (j.status === 'done' || j.status === 'error') {
+      clearInterval(pollTimer);
+      await loadState();
+      if (action === 'predict') loadPredictions();
+      if (action === 'backtest') loadBacktest(true);
+    }
+  }, 900);
+}
+
+$('btnBuild').onclick    = () => runJob('build',    null, $('setupJobName'), $('setupJobTime'), $('setupLog'), $('setupJob'));
+$('btnTrain').onclick    = () => runJob('train',    null, $('setupJobName'), $('setupJobTime'), $('setupLog'), $('setupJob'));
+$('btnBacktest').onclick = () => runJob('backtest', null, $('setupJobName'), $('setupJobTime'), $('setupLog'), $('setupJob'));
+$('btnPredict').onclick  = () => {
+  const season = Number($('selSeason').value), week = Number($('selWeek').value);
+  postJSON('/api/settings', {season, week});
+  runJob('predict', {season, week, forecast: $('chkForecast').checked},
+         $('predJobName'), $('predJobTime'), $('predLog'), $('predJob'));
+};
+
+/* =====================================================================
+   predictions
+   ===================================================================== */
+async function loadPredictions() {
+  const season = Number($('selSeason').value), week = Number($('selWeek').value);
+  if (!season || !week) return;
+  postJSON('/api/settings', {season, week});
+  const d = await getJSON(`/api/predictions?season=${season}&week=${week}`);
+  const wrap = $('predTableWrap');
+  if (!d.available) {
+    ROWS = []; PACKETS = [];
+    $('predMeta').textContent = '';
+    renderBetCard();
+    wrap.innerHTML = `<div class="empty">Nothing predicted for ${season} week ${week} yet.<br>
+      Press <strong>Run prediction</strong> above.</div>`;
+    return;
+  }
+  ROWS = d.rows; PACKETS = d.packets || [];
+  $('predMeta').textContent = `${ROWS.length} games`;
+  renderBetCard();
+
+  const head = `<thead><tr>
+      <th>Matchup</th><th class="r">Win prob</th><th class="r">Model line</th>
+      <th class="r">Market</th><th class="r">Edge</th><th class="r">Model total</th>
+      <th class="r">Mkt total</th><th class="r">Edge</th><th>Read</th></tr></thead>`;
+
+  const body = ROWS.map((r, i) => {
+    const p = r.model_p_home_win ?? 0;
+    const conf = String(r.confidence || 'pass').toLowerCase();
+    const edge = r.model_spread_edge, tedge = r.model_total_edge;
+    return `<tr data-i="${i}" tabindex="0">
+      <td><strong>${esc(r.away_team)}</strong> <span class="muted">at</span> <strong>${esc(r.home_team)}</strong></td>
+      <td class="r num">
+        <div style="min-width:120px">
+          <div class="meter" title="${esc(r.home_team)} ${pct(p)}">
+            <i class="home" style="flex:${Math.max(p, .001)}"></i>
+            <i class="away" style="flex:${Math.max(1 - p, .001)}"></i>
+          </div>
+          <div class="meter-labels"><span>${esc(r.home_team)} ${pct(p, 0)}</span>
+            <span>${esc(r.away_team)} ${pct(1 - p, 0)}</span></div>
+        </div></td>
+      <td class="r num">${sgn(r.model_model_spread)}</td>
+      <td class="r num">${sgn(r.home_spread === null ? null : -r.home_spread)}</td>
+      <td class="r num" style="color:${Math.abs(edge ?? 0) >= 2 ? 'var(--text-primary)' : 'var(--text-muted)'}">${sgn(edge)}</td>
+      <td class="r num">${fmt(r.model_pred_total)}</td>
+      <td class="r num">${fmt(r.market_total)}</td>
+      <td class="r num" style="color:${Math.abs(tedge ?? 0) >= 3 ? 'var(--text-primary)' : 'var(--text-muted)'}">${sgn(tedge)}</td>
+      <td><span class="tag ${conf}">${esc(r.confidence || '')}</span>
+          <span class="muted" style="font-size:12px">&nbsp;${esc(r.pick_side || '')}</span></td>
+    </tr>`;
+  }).join('');
+
+  wrap.innerHTML = `<table>${head}<tbody>${body}</tbody></table>
+    <p class="note" style="margin:14px 0 0">
+      <span class="swatch" style="background:var(--series-home)"></span>home team
+      <span class="swatch" style="background:var(--series-away);margin-left:14px"></span>away team
+      &nbsp;·&nbsp; Lines are shown book-style, so <span class="num">-3.5</span> means favoured by 3.5.
+      Edge is the model's number minus the market's.</p>`;
+
+  wrap.querySelectorAll('tbody tr').forEach(tr => {
+    const open = () => openPanel(Number(tr.dataset.i));
+    tr.onclick = open;
+    tr.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
+  });
+}
+
+
+/* =====================================================================
+   bet card — the slate translated into Bet / Small bet / Skip
+   ===================================================================== */
+const BET_RULES = { spread: { bet: 3.5, small: 2 }, total: { bet: 3, small: 2 } };
+
+function tierFor(edge, anchoredEdge, kind) {
+  const a = Math.abs(edge ?? 0), r = BET_RULES[kind];
+  let tier = a >= r.bet ? 'bet' : a >= r.small ? 'small' : 'skip';
+  let disagree = false;
+  if (anchoredEdge !== null && anchoredEdge !== undefined && edge !== null &&
+      Math.sign(anchoredEdge) !== Math.sign(edge) && tier !== 'skip') {
+    tier = tier === 'bet' ? 'small' : 'skip';          // one notch down when the two models disagree
+    disagree = true;
+  }
+  return { tier, disagree };
+}
+
+function betLines(r) {
+  const out = [];
+  if (r.home_spread !== null && r.model_spread_edge !== null) {
+    const homePick = r.model_spread_edge > 0;
+    const team = homePick ? r.home_team : r.away_team;
+    const line = homePick ? -r.home_spread : r.home_spread;         // book-style for the picked side
+    const mkt = r.home_spread, mm = r.model_pred_margin;
+    const bookSays = mkt >= 0 ? `${r.home_team} wins by ${fmt(mkt)}` : `${r.away_team} wins by ${fmt(-mkt)}`;
+    const modelSays = mm >= 0 ? `${r.home_team} wins by ${fmt(mm)}` : `${r.away_team} wins by ${fmt(-mm)}`;
+    const t = tierFor(r.model_spread_edge, r.anchored_spread_edge, 'spread');
+    out.push({ ...t, kind: 'spread', gap: Math.abs(r.model_spread_edge),
+      what: `${team} ${sgn(line)}`,
+      why: `The book says ${bookSays}. The model says ${modelSays} — a ${fmt(Math.abs(r.model_spread_edge))} point gap.` });
+  }
+  if (r.market_total !== null && r.model_total_edge !== null) {
+    const over = r.model_total_edge > 0;
+    const t = tierFor(r.model_total_edge, r.anchored_total_edge, 'total');
+    out.push({ ...t, kind: 'total', gap: Math.abs(r.model_total_edge),
+      what: `${over ? 'Over' : 'Under'} ${fmt(r.market_total)}`,
+      why: `The book set the total at ${fmt(r.market_total)}. The model expects about ${fmt(r.model_pred_total)} points — a ${fmt(Math.abs(r.model_total_edge))} point gap.` });
+  }
+  return out.map(b => ({ ...b, game: `${r.away_team} at ${r.home_team}` }));
+}
+
+const VERDICT = { bet: 'Bet', small: 'Small bet', skip: 'Skip' };
+function betRow(b) {
+  return `<div class="bet t-${b.tier}">
+    <span class="verdict">${VERDICT[b.tier]}</span>
+    <div>
+      <div class="what">${esc(b.what)} <span class="muted" style="font-weight:400;font-size:13px">· ${esc(b.game)}</span></div>
+      <div class="why">${esc(b.why)}${b.disagree
+        ? ` <span class="warn">Careful: the market-aware model leans the other way, so this was moved down a step.</span>` : ''}</div>
+    </div></div>`;
+}
+
+async function renderBetCard() {
+  const list = $('betList');
+  if (!ROWS.length) { list.innerHTML = `<div class="empty">Run a prediction first.</div>`; return; }
+  const all = ROWS.flatMap(betLines);
+  const order = { bet: 0, small: 1, skip: 2 };
+  all.sort((x, y) => order[x.tier] - order[y.tier] || y.gap - x.gap);
+  const plays = all.filter(b => b.tier !== 'skip'), skips = all.filter(b => b.tier === 'skip');
+
+  let html = `<div class="bets">${plays.map(betRow).join('')}</div>`;
+  if (!plays.length) html = `<div class="empty">Nothing worth betting this week — every game is too close to the book's number.</div>`;
+  if (skips.length) html += `<details class="skips"><summary>${skips.length} skips — show them anyway</summary>
+      <div class="bets" style="margin-top:8px">${skips.map(betRow).join('')}</div></details>`;
+
+  // honesty box: what bets like these actually did in the walk-forward test
+  if (!lastBacktest) { try { const d = await getJSON('/api/backtest'); if (d.available) lastBacktest = d; } catch (e) {} }
+  const m = (lastBacktest || {}).no_market_model;
+  if (m) {
+    const be = m['breakeven_at_-110'] ?? 0.524;
+    const bit = (rate, n) => rate === undefined ? null : `won <span class="num">${pct(rate)}</span> of ${n} bets`;
+    const s4 = bit(m.ats_win_rate_edge4, m.ats_n_edge4), s2 = bit(m.ats_win_rate_edge2, m.ats_n_edge2);
+    const t3 = bit(m.totals_win_rate_edge3, m.totals_n_edge3);
+    html += `<div class="bet-honest"><strong>Be honest with yourself.</strong> In the 2015–2025 test,
+      spread picks with a 4+ point gap ${s4 || '–'}; picks with a 2+ point gap ${s2 || '–'}.
+      Over/under picks with a 3+ point gap ${t3 || '–'}.
+      You need <span class="num">${pct(be)}</span> just to break even at −110. That is a coin flip with a small tax,
+      so treat "Bet" as <em>small stakes for fun</em>, not a paycheck.</div>`;
+  }
+  list.innerHTML = html;
+}
+
+/* =====================================================================
+   game panel
+   ===================================================================== */
+function driverBars(list, homeAbbr, awayAbbr) {
+  if (!list || !list.length) return '<p class="note">Not available.</p>';
+  const max = Math.max(...list.map(d => Math.abs(d.impact || 0))) || 1;
+  return `<div class="drivers">` + list.slice(0, 8).map(d => {
+    const v = d.impact || 0, w = Math.abs(v) / max * 50;
+    const bar = v >= 0
+      ? `<i class="pos" style="left:50%;width:${w}%"></i>`
+      : `<i class="neg" style="right:50%;width:${w}%"></i>`;
+    return `<div class="driver">
+      <span class="lbl" title="${esc(d.label)}">${esc(d.label)}</span>
+      <span class="dbar"><span class="mid"></span>${bar}</span>
+      <span class="r num sec" style="text-align:right">${sgn(v, 2)}</span></div>`;
+  }).join('') + `</div>
+  <div class="meter-labels" style="margin-top:8px">
+    <span><span class="swatch" style="background:var(--series-away)"></span>favours ${esc(awayAbbr)}</span>
+    <span>favours ${esc(homeAbbr)}<span class="swatch" style="background:var(--series-home);margin-left:6px"></span></span>
+  </div>`;
+}
+
+let currentPacket = null;
+function openPanel(i) {
+  const r = ROWS[i];
+  const pk = PACKETS.find(p => p.game && p.game.game_id === r.game_id) || PACKETS[i] || null;
+  currentPacket = pk;
+  $('panelTitle').textContent = `${r.away_team} at ${r.home_team}`;
+
+  const p = r.model_p_home_win ?? 0;
+  let html = `
+  <div>
+    <h3>Model</h3>
+    <div class="meter" style="margin-top:10px">
+      <i class="home" style="flex:${Math.max(p, .001)}"></i>
+      <i class="away" style="flex:${Math.max(1 - p, .001)}"></i></div>
+    <div class="meter-labels">
+      <span><span class="swatch" style="background:var(--series-home)"></span>${esc(r.home_team)} ${pct(p)}</span>
+      <span>${esc(r.away_team)} ${pct(1 - p)}<span class="swatch" style="background:var(--series-away);margin-left:6px"></span></span>
+    </div>
+    <dl class="kv" style="margin-top:14px">
+      <dt>Model line</dt><dd class="num">${esc(r.home_team)} ${sgn(r.model_model_spread)}</dd>
+      <dt>Market line</dt><dd class="num">${esc(r.home_team)} ${sgn(r.home_spread === null ? null : -r.home_spread)}</dd>
+      <dt>Spread edge</dt><dd class="num">${sgn(r.model_spread_edge)} pts</dd>
+      <dt>Model total</dt><dd class="num">${fmt(r.model_pred_total)}</dd>
+      <dt>Market total</dt><dd class="num">${fmt(r.market_total)}</dd>
+      <dt>Total edge</dt><dd class="num">${sgn(r.model_total_edge)} pts</dd>
+      <dt>Read</dt><dd>${esc(r.confidence || '')} · ${esc(r.pick_side || '')} / ${esc(r.pick_total || '')}</dd>
+    </dl>
+  </div>`;
+
+  if (pk) {
+    const u = pk.uncertainty || {}, env = pk.environment || {}, mk = pk.market || {};
+    html += `<div><h3>What moves the margin</h3>${driverBars((pk.drivers || {}).margin, r.home_team, r.away_team)}</div>`;
+    html += `<div><h3>What moves the total</h3>${driverBars((pk.drivers || {}).total, 'higher scoring', 'lower scoring')}</div>`;
+
+    if (pk.matchup_edges && pk.matchup_edges.length) {
+      html += `<div><h3>Unit matchups</h3><dl class="kv" style="margin-top:8px">` +
+        pk.matchup_edges.map(e => `<dt>${esc(e.matchup)}</dt><dd class="num">${sgn(e.edge, 3)}</dd>`).join('') +
+        `</dl></div>`;
+    }
+    if (pk.team_form) {
+      html += `<div><h3>Form</h3><dl class="kv" style="margin-top:8px">` +
+        Object.entries(pk.team_form).map(([team, f]) =>
+          `<dt>${esc(team)}</dt><dd class="num">power ${fmt(f.power_rating, 2)} · off ${fmt(f.offense_rating, 2)} · def ${fmt(f.defense_rating, 2)}</dd>`
+        ).join('') + `</dl></div>`;
+    }
+    html += `<div><h3>Environment</h3><dl class="kv" style="margin-top:8px">
+        <dt>Roof / surface</dt><dd>${esc(env.roof || '–')} · ${esc(env.surface || '–')}</dd>
+        <dt>Wind</dt><dd class="num">${fmt(env.wind_mph)} mph</dd>
+        <dt>Temperature</dt><dd class="num">${fmt(env.temp_f)} °F</dd>
+        <dt>Rest</dt><dd class="num">${fmt(env.home_rest_days, 0)} / ${fmt(env.away_rest_days, 0)} days</dd>
+        <dt>Away travel</dt><dd class="num">${fmt(env.away_travel_miles, 0)} mi</dd>
+      </dl></div>`;
+    html += `<div><h3>Uncertainty</h3><dl class="kv" style="margin-top:8px">
+        <dt>Margin sd</dt><dd class="num">${fmt((pk.prediction || {}).margin_uncertainty_sd)} pts</dd>
+        <dt>Ensemble disagreement</dt><dd class="num">${fmt(u.win_prob_member_sd, 3)}</dd>
+      </dl></div>`;
+    if (pk.flags && pk.flags.length) {
+      html += `<div><h3>Flags</h3><ul class="flags" style="margin-top:8px">` +
+        pk.flags.map(f => `<li>${esc(f)}</li>`).join('') + `</ul></div>`;
+    }
+  } else {
+    html += `<p class="note">No reasoning packet found for this game. Re-run the prediction to generate one.</p>`;
+  }
+
+  $('panelBody').innerHTML = html;
+  $('panel').dataset.open = '1'; $('panel').setAttribute('aria-hidden', 'false');
+  $('scrim').dataset.open = '1';
+}
+function closePanel() {
+  $('panel').dataset.open = '0'; $('panel').setAttribute('aria-hidden', 'true');
+  $('scrim').dataset.open = '0';
+}
+$('btnClose').onclick = closePanel;
+$('scrim').onclick = closePanel;
+addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
+
+$('btnCopy').onclick = async () => {
+  if (!currentPacket) return;
+  const p = currentPacket, g = p.game || {}, pr = p.prediction || {}, mk = p.market || {};
+  const lines = [
+    `Game: ${g.away_team} at ${g.home_team} — ${g.season} week ${g.week}`,
+    `Model: home win ${pct(pr.home_win_prob)}, line ${sgn(pr.model_spread_home)}, total ${fmt(pr.predicted_total)}`,
+    `Market: line ${sgn(mk.market_spread_home)}, total ${fmt(mk.market_total)}, edge ${sgn(mk.spread_edge_points)} pts`,
+    ``, `Margin drivers:`,
+    ...((p.drivers || {}).margin || []).map(d => `  - ${d.label}: ${sgn(d.impact, 2)} (${d.direction})`),
+    ``, `Flags:`, ...(p.flags || []).map(f => `  - ${f}`),
+    ``, `Explain why the model landed here, name the deciding matchup, weigh injuries and weather in points, argue the other side, then give a pass / lean / play read.`
+  ].join('\n');
+  try {
+    await navigator.clipboard.writeText(lines);
+    $('btnCopy').textContent = 'Copied';
+    setTimeout(() => { $('btnCopy').textContent = 'Copy LLM prompt'; }, 1400);
+  } catch (e) {
+    $('btnCopy').textContent = 'Copy failed';
+    setTimeout(() => { $('btnCopy').textContent = 'Copy LLM prompt'; }, 1400);
+  }
+};
+
+/* =====================================================================
+   backtest
+   ===================================================================== */
+async function loadBacktest(force) {
+  if (lastBacktest && !force) { renderBacktestSummary(lastBacktest); renderBacktestCharts(lastBacktest); return; }
+  const d = await getJSON('/api/backtest');
+  if (!d.available) {
+    $('btSummary').innerHTML = `<div class="empty">No backtest yet. Run it from the Setup tab.</div>`;
+    $('btCharts').innerHTML = '';
+    return;
+  }
+  lastBacktest = d;
+  renderBacktestSummary(d);
+  renderBacktestCharts(d);
+}
+
+// the bet card fetches the backtest too (for its honesty footer) and caches it in
+// lastBacktest, so the summary table must be renderable from the cache as well
+function renderBacktestSummary(d) {
+  const a = d.no_market_model || {}, b = d.market_anchored_model || {};
+  const rows = [
+    ['Win accuracy',  a.win_accuracy,  b.win_accuracy,  a.market_win_accuracy, 'pct'],
+    ['Log loss',      a.win_log_loss,  b.win_log_loss,  a.market_win_log_loss, 'num3'],
+    ['Brier score',   a.win_brier,     b.win_brier,     a.market_win_brier,    'num3'],
+    ['Margin MAE',    a.ats_mae_margin, b.ats_mae_margin, a.market_mae_margin, 'num2'],
+    ['Total MAE',     a.totals_mae,    b.totals_mae,    a.market_totals_mae,   'num2'],
+    ['ATS win rate',  a.ats_win_rate,  b.ats_win_rate,  null,                  'pct'],
+    ['Totals win rate', a.totals_win_rate, b.totals_win_rate, null,            'pct'],
+  ];
+  const f = (v, kind) => v === null || v === undefined ? '–'
+    : kind === 'pct' ? pct(v) : kind === 'num3' ? fmt(v, 3) : fmt(v, 2);
+
+  $('btSummary').innerHTML = `
+    <table><thead><tr><th>Metric</th><th class="r">No-market model</th>
+      <th class="r">Market-anchored</th><th class="r">Closing line</th></tr></thead>
+      <tbody>${rows.map(r => `<tr style="cursor:default">
+        <td>${r[0]}</td><td class="r num">${f(r[1], r[4])}</td>
+        <td class="r num">${f(r[2], r[4])}</td>
+        <td class="r num muted">${f(r[3], r[4])}</td></tr>`).join('')}</tbody></table>
+    <p class="note" style="margin:14px 0 0">Across ${a.games ?? '–'} games.
+      Breakeven on a −110 bet is <span class="num">52.4%</span>, so an ATS rate near
+      <span class="num">50%</span> means no edge over the spread — which is the expected
+      result for a model built on public data.</p>`;
+}
+
+function svgChart(title, subtitle, inner, legend) {
+  return `<div class="card"><div class="card-head"><h2>${esc(title)}</h2>
+    <span class="muted" style="font-size:13px">${esc(subtitle)}</span></div>
+    ${legend || ''}${inner}</div>`;
+}
+
+function renderBacktestCharts(d) {
+  const seasons = d.by_season || [], calib = (d.calibration || []).map(c => ({
+    n: Number(c.n), predicted: Number(c.predicted), actual: Number(c.actual)
+  })).filter(c => Number.isFinite(c.predicted) && Number.isFinite(c.actual));
+
+  const cHome = ink('--series-home'), cAway = ink('--series-away');
+
+  /* ---- season accuracy: two series, so a legend is mandatory ---- */
+  let seasonChart = '<p class="note">No season detail.</p>';
+  if (seasons.length) {
+    const W = 520, H = 240, m = {t: 12, r: 44, b: 28, l: 40};
+    const xs = seasons.map(s => Number(s.season));
+    const vals = seasons.flatMap(s => [Number(s.win_accuracy), Number(s.market_win_accuracy)])
+                        .filter(Number.isFinite);
+    const lo = Math.min(...vals) - .03, hi = Math.max(...vals) + .03;
+    const X = i => m.l + i * (W - m.l - m.r) / Math.max(xs.length - 1, 1);
+    const Y = v => m.t + (hi - v) * (H - m.t - m.b) / (hi - lo);
+    const line = key => seasons.map((s, i) => `${i ? 'L' : 'M'}${X(i)},${Y(Number(s[key]))}`).join('');
+    const ticks = [];
+    for (let v = Math.ceil(lo * 20) / 20; v <= hi; v += .05) ticks.push(v);
+    const last = seasons.length - 1;
+    seasonChart = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img"
+        aria-label="Win accuracy by season, model versus closing line">
+      ${ticks.map(v => `<line class="gridline" x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}"/>
+         <text x="${m.l - 8}" y="${Y(v) + 4}" text-anchor="end">${(v * 100).toFixed(0)}%</text>`).join('')}
+      <line class="axisline" x1="${m.l}" x2="${W - m.r}" y1="${H - m.b}" y2="${H - m.b}"/>
+      <path class="ln" d="${line('market_win_accuracy')}" stroke="${cAway}"/>
+      <path class="ln" d="${line('win_accuracy')}" stroke="${cHome}"/>
+      ${seasons.map((s, i) => `
+        <circle cx="${X(i)}" cy="${Y(Number(s.market_win_accuracy))}" r="4.5" fill="${cAway}"
+          stroke="var(--surface-1)" stroke-width="2"
+          data-tip="${esc(s.season)} · closing line ${pct(s.market_win_accuracy)}"/>
+        <circle cx="${X(i)}" cy="${Y(Number(s.win_accuracy))}" r="4.5" fill="${cHome}"
+          stroke="var(--surface-1)" stroke-width="2"
+          data-tip="${esc(s.season)} · model ${pct(s.win_accuracy)}"/>`).join('')}
+      <text class="lbl" x="${X(last) + 8}" y="${Y(Number(seasons[last].win_accuracy)) + 4}" fill="${cHome}">Model</text>
+      <text class="lbl" x="${X(last) + 8}" y="${Y(Number(seasons[last].market_win_accuracy)) + 4}" fill="${cAway}">Line</text>
+      ${seasons.map((s, i) => (i % 2 === 0 || i === last)
+        ? `<text x="${X(i)}" y="${H - m.b + 16}" text-anchor="middle">${esc(String(s.season)).slice(2)}</text>` : '').join('')}
+    </svg>`;
+  }
+  const seasonLegend = `<div class="legend">
+    <span><span class="swatch" style="background:var(--series-home)"></span>Model</span>
+    <span><span class="swatch" style="background:var(--series-away)"></span>Closing line</span></div>`;
+
+  /* ---- calibration: one series against a reference diagonal ---- */
+  let calChart = '<p class="note">No calibration detail.</p>';
+  if (calib.length) {
+    const W = 520, H = 268, m = {t: 14, r: 18, b: 44, l: 56};
+    const X = v => m.l + v * (W - m.l - m.r);
+    const Y = v => m.t + (1 - v) * (H - m.t - m.b);
+    const rMax = Math.max(...calib.map(c => c.n));
+    calChart = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img"
+        aria-label="Calibration: predicted versus actual home win rate">
+      ${[0, .25, .5, .75, 1].map(v => `
+        <line class="gridline" x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}"/>
+        <text x="${m.l - 8}" y="${Y(v) + 4}" text-anchor="end">${(v * 100).toFixed(0)}</text>
+        <text x="${X(v)}" y="${H - m.b + 17}" text-anchor="middle">${(v * 100).toFixed(0)}</text>`).join('')}
+      <line class="axisline" x1="${m.l}" x2="${W - m.r}" y1="${H - m.b}" y2="${H - m.b}"/>
+      <line class="axisline" x1="${m.l}" x2="${m.l}" y1="${m.t}" y2="${H - m.b}"/>
+      <line x1="${X(0)}" y1="${Y(0)}" x2="${X(1)}" y2="${Y(1)}" stroke="var(--axis)"
+            stroke-width="2" stroke-dasharray="4 4"/>
+      ${calib.map(c => `<circle cx="${X(c.predicted)}" cy="${Y(c.actual)}"
+          r="${5 + 7 * Math.sqrt(c.n / rMax)}" fill="${cHome}" fill-opacity=".85"
+          stroke="var(--surface-1)" stroke-width="2"
+          data-tip="predicted ${pct(c.predicted)} → actual ${pct(c.actual)}<br>${c.n} games"/>`).join('')}
+      <text x="${m.l + (W - m.l - m.r) / 2}" y="${H - 6}" text-anchor="middle">predicted home win %</text>
+      <text transform="translate(14 ${m.t + (H - m.t - m.b) / 2}) rotate(-90)"
+            text-anchor="middle">actual home win %</text>
+    </svg>`;
+  }
+  // the reference diagonal is called out in the legend rather than labelled
+  // in-plot, where it collided with the dots that sit on top of it
+  const calLegend = `<div class="legend">
+    <span><span class="swatch" style="background:var(--series-home);border-radius:50%"></span>Probability bucket</span>
+    <span><span class="swatch" style="background:var(--axis)"></span>Perfect calibration</span></div>`;
+
+  $('btCharts').innerHTML =
+    svgChart('Win accuracy by season', 'model vs the closing line', seasonChart, seasonLegend) +
+    svgChart('Calibration', 'dot size is games in the bucket', calChart, calLegend);
+
+  $('btCharts').querySelectorAll('[data-tip]').forEach(el => {
+    el.addEventListener('mousemove', e => showTip(el.dataset.tip, e));
+    el.addEventListener('mouseleave', hideTip);
+  });
+}
+
+/* =====================================================================
+   boot
+   ===================================================================== */
+(async function boot() {
+  await loadState();
+  await loadPredictions();
+})();
+</script>
+</body>
+</html>
